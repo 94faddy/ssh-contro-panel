@@ -1,0 +1,109 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id          Int      @id @default(autoincrement())
+  email       String   @unique
+  password    String
+  name        String
+  role        Role     @default(DEVELOPER)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Relations
+  servers     Server[]
+  scriptLogs  ScriptLog[]
+  
+  @@map("users")
+}
+
+model Server {
+  id          Int      @id @default(autoincrement())
+  name        String   // ชื่อหรือ note สำหรับจำ
+  host        String   // IP address
+  port        Int      @default(22)
+  username    String   // SSH username
+  password    String   // SSH password (encrypted)
+  isActive    Boolean  @default(true)
+  status      ServerStatus @default(DISCONNECTED)
+  lastChecked DateTime?
+  systemInfo  Json?    // เก็บข้อมูล system info
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Relations
+  userId      Int
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  scriptLogs  ScriptLog[]
+  serverLogs  ServerLog[]
+  
+  @@map("servers")
+}
+
+model ScriptLog {
+  id          Int      @id @default(autoincrement())
+  scriptName  String
+  command     String   @db.Text
+  status      ScriptStatus @default(RUNNING)
+  output      String?  @db.LongText
+  error       String?  @db.Text
+  startTime   DateTime @default(now())
+  endTime     DateTime?
+  duration    Int?     // seconds
+  
+  // Relations
+  userId      Int
+  user        User     @relation(fields: [userId], references: [id])
+  serverId    Int
+  server      Server   @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  
+  @@map("script_logs")
+}
+
+model ServerLog {
+  id          Int      @id @default(autoincrement())
+  logType     LogType
+  message     String   @db.Text
+  data        Json?
+  timestamp   DateTime @default(now())
+  
+  // Relations
+  serverId    Int
+  server      Server   @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  
+  @@map("server_logs")
+}
+
+enum Role {
+  ADMIN
+  DEVELOPER
+}
+
+enum ServerStatus {
+  CONNECTED
+  DISCONNECTED
+  ERROR
+  CONNECTING
+}
+
+enum ScriptStatus {
+  RUNNING
+  SUCCESS
+  FAILED
+  CANCELLED
+}
+
+enum LogType {
+  CONNECTION
+  COMMAND
+  ERROR
+  SYSTEM
+  AUTH
+}
