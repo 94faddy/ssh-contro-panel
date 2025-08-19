@@ -3,7 +3,7 @@ import { withAuth } from '@/lib/auth';
 import { prisma } from '@/lib/database';
 import { testSSHConnection } from '@/lib/ssh';
 import { validateIP, validatePort } from '@/lib/utils';
-import type { ApiResponse, User, Server, CreateServerData, ServerFilter, PaginatedResponse, SystemInfo } from '@/types';
+import type { ApiResponse, User, Server, CreateServerData, ServerFilter, PaginatedResponse } from '@/types';
 
 // GET /api/servers - Get user's servers with filtering and pagination
 export const GET = withAuth(async (request: NextRequest & { user: User }) => {
@@ -72,32 +72,13 @@ export const GET = withAuth(async (request: NextRequest & { user: User }) => {
       }
     });
 
-    // Safely parse systemInfo for each server
-    const serversData: Server[] = servers.map(server => {
-      let parsedSystemInfo: SystemInfo | undefined;
-      
-      try {
-        if (server.systemInfo) {
-          // Handle both string JSON and object cases
-          if (typeof server.systemInfo === 'string') {
-            parsedSystemInfo = JSON.parse(server.systemInfo) as SystemInfo;
-          } else if (typeof server.systemInfo === 'object' && server.systemInfo !== null) {
-            parsedSystemInfo = server.systemInfo as unknown as SystemInfo;
-          }
-        }
-      } catch (error) {
-        console.error('Failed to parse systemInfo for server', server.id, ':', error);
-        parsedSystemInfo = undefined;
-      }
-
-      return {
-        ...server,
-        createdAt: server.createdAt.toISOString(),
-        updatedAt: server.updatedAt.toISOString(),
-        lastChecked: server.lastChecked?.toISOString(),
-        systemInfo: parsedSystemInfo
-      };
-    });
+    const serversData: Server[] = servers.map(server => ({
+      ...server,
+      createdAt: server.createdAt.toISOString(),
+      updatedAt: server.updatedAt.toISOString(),
+      lastChecked: server.lastChecked?.toISOString(),
+      systemInfo: server.systemInfo as any
+    }));
 
     return NextResponse.json<PaginatedResponse<Server>>({
       success: true,
@@ -186,27 +167,12 @@ export const POST = withAuth(async (request: NextRequest & { user: User }) => {
       }
     });
 
-    // Safely parse systemInfo
-    let parsedSystemInfo: SystemInfo | undefined;
-    try {
-      if (newServer.systemInfo) {
-        if (typeof newServer.systemInfo === 'string') {
-          parsedSystemInfo = JSON.parse(newServer.systemInfo) as SystemInfo;
-        } else if (typeof newServer.systemInfo === 'object' && newServer.systemInfo !== null) {
-          parsedSystemInfo = newServer.systemInfo as unknown as SystemInfo;
-        }
-      }
-    } catch (error) {
-      console.error('Failed to parse systemInfo for new server:', error);
-      parsedSystemInfo = connectionTest.systemInfo;
-    }
-
     const serverData: Server = {
       ...newServer,
       createdAt: newServer.createdAt.toISOString(),
       updatedAt: newServer.updatedAt.toISOString(),
       lastChecked: newServer.lastChecked?.toISOString(),
-      systemInfo: parsedSystemInfo
+      systemInfo: newServer.systemInfo as any
     };
 
     return NextResponse.json<ApiResponse<Server>>({

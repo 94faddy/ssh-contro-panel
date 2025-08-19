@@ -61,22 +61,6 @@ export const GET = withAuth(async (request: NextRequest & { user: User }, { para
       }
     });
 
-    // Safely parse systemInfo
-    let parsedSystemInfo: SystemInfo | undefined;
-    try {
-      if (updatedServer?.systemInfo) {
-        // Handle both string JSON and object cases
-        if (typeof updatedServer.systemInfo === 'string') {
-          parsedSystemInfo = JSON.parse(updatedServer.systemInfo) as SystemInfo;
-        } else if (typeof updatedServer.systemInfo === 'object' && updatedServer.systemInfo !== null) {
-          parsedSystemInfo = updatedServer.systemInfo as unknown as SystemInfo;
-        }
-      }
-    } catch (error) {
-      console.error('Failed to parse systemInfo:', error);
-      parsedSystemInfo = undefined;
-    }
-
     return NextResponse.json<ApiResponse<{
       serverId: number;
       serverName: string;
@@ -90,7 +74,7 @@ export const GET = withAuth(async (request: NextRequest & { user: User }, { para
         serverName: updatedServer!.name,
         status: updatedServer!.status,
         lastChecked: updatedServer!.lastChecked?.toISOString(),
-        systemInfo: parsedSystemInfo
+        systemInfo: updatedServer!.systemInfo as SystemInfo
       },
       message: 'Server status updated'
     });

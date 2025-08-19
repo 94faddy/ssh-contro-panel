@@ -20,26 +20,6 @@ interface ScriptExecution {
   progress?: number;
 }
 
-// ฟังก์ชันสำหรับสร้าง WebSocket URL ที่รองรับ Cloudflare Proxy
-function getWebSocketURL(): string {
-  if (typeof window === 'undefined') return '';
-  
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const hostname = window.location.hostname;
-  
-  // ตรวจสอบว่าใช้ Cloudflare Proxy หรือไม่
-  const isCloudflareProxy = hostname.includes('.cloud') || hostname.includes('cloudflare');
-  
-  if (isCloudflareProxy) {
-    // สำหรับ Cloudflare Proxy ใช้ HTTPS/HTTP endpoint
-    return `${window.location.protocol}//${hostname}`;
-  } else {
-    // สำหรับการใช้งานปกติ
-    const wsPort = process.env.NEXT_PUBLIC_WS_PORT || '3126';
-    return `${protocol}//${hostname}:${wsPort}`;
-  }
-}
-
 export default function ScriptsPage() {
   const [servers, setServers] = useState<Server[]>([]);
   const [selectedServers, setSelectedServers] = useState<number[]>([]);
@@ -52,19 +32,6 @@ export default function ScriptsPage() {
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('');
   const [loading, setLoading] = useState(true);
-  const [connectionStatus, setConnectionStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected');
-  const [isCloudflareProxy, setIsCloudflareProxy] = useState(false);
-  const [reconnectAttempts, setReconnectAttempts] = useState(0);
-
-  // ตรวจสอบว่าใช้ Cloudflare Proxy หรือไม่
-  useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const hostname = window.location.hostname;
-      const isProxy = hostname.includes('.cloud') || hostname.includes('cloudflare');
-      setIsCloudflareProxy(isProxy);
-      console.log('Scripts page - Cloudflare Proxy detected:', isProxy);
-    }
-  }, []);
 
   useEffect(() => {
     fetchServers();
@@ -102,90 +69,14 @@ export default function ScriptsPage() {
     const token = localStorage.getItem('auth_token');
     if (!token) return;
 
-    setConnectionStatus('connecting');
-
-    const wsUrl = getWebSocketURL();
-    console.log('Scripts - Connecting to WebSocket:', wsUrl);
-    console.log('Scripts - Cloudflare Proxy mode:', isCloudflareProxy);
-
-    // สร้าง Socket.IO connection ที่รองรับ Cloudflare Proxy
-    const socketOptions: any = {
+    const newSocket = io(`${window.location.protocol}//${window.location.hostname}:3001`, {
       auth: { token },
-      forceNew: true,
-      timeout: 20000,
-      reconnection: true,
-      reconnectionAttempts: 5,
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: 5000,
-      maxReconnectionAttempts: 5,
-      randomizationFactor: 0.5
-    };
-
-    if (isCloudflareProxy) {
-      // สำหรับ Cloudflare Proxy ใช้ polling เป็นหลัก
-      socketOptions.transports = ['polling', 'websocket'];
-      socketOptions.upgrade = true;
-      socketOptions.rememberUpgrade = false;
-      socketOptions.pingTimeout = 60000;
-      socketOptions.pingInterval = 25000;
-    } else {
-      // สำหรับการใช้งานปกติ
-      socketOptions.transports = ['websocket', 'polling'];
-      socketOptions.upgrade = true;
-    }
-
-    const newSocket = io(wsUrl, socketOptions);
+      transports: ['websocket', 'polling']
+    });
 
     newSocket.on('connect', () => {
-      console.log('Scripts - Socket.IO connected with transport:', newSocket.io.engine.transport.name);
+      console.log('WebSocket connected for scripts');
       setSocket(newSocket);
-      setConnectionStatus('connected');
-      setReconnectAttempts(0);
-    });
-
-    newSocket.on('connect_error', (error) => {
-      console.error('Scripts - Socket.IO connection error:', error);
-      setConnectionStatus('disconnected');
-      const attempts = reconnectAttempts + 1;
-      setReconnectAttempts(attempts);
-      
-      if (attempts >= 5) {
-        Swal.fire({
-          title: 'Connection Failed',
-          text: 'Failed to connect to script execution service. Please check your internet connection.',
-          icon: 'error'
-        });
-      }
-    });
-
-    newSocket.on('disconnect', (reason) => {
-      console.log('Scripts - Socket.IO disconnected:', reason);
-      setConnectionStatus('disconnected');
-      setSocket(null);
-      
-      // Auto-reconnect only for network issues
-      if (reason === 'io server disconnect' || reason === 'ping timeout' || reason === 'transport close') {
-        setTimeout(() => {
-          if (reconnectAttempts < 3) {
-            console.log('Scripts - Attempting to reconnect...');
-            initializeSocket();
-          }
-        }, 2000 + (reconnectAttempts * 1000));
-      }
-    });
-
-    newSocket.on('reconnect', (attemptNumber) => {
-      console.log('Scripts - Socket.IO reconnected after', attemptNumber, 'attempts');
-      setReconnectAttempts(0);
-    });
-
-    // Transport upgrade events
-    newSocket.io.engine.on('upgrade', () => {
-      console.log('Scripts - Upgraded to transport:', newSocket.io.engine.transport.name);
-    });
-
-    newSocket.io.engine.on('upgradeError', (error) => {
-      console.log('Scripts - Upgrade error:', error);
     });
 
     newSocket.on('script:started', (data: { 
@@ -256,15 +147,9 @@ export default function ScriptsPage() {
       });
     });
 
-    newSocket.on('script:cancelled', () => {
-      setIsRunning(false);
-      setCurrentExecutionId(null);
-      
-      Swal.fire({
-        title: 'Script Cancelled',
-        text: 'Script execution has been cancelled.',
-        icon: 'info'
-      });
+    newSocket.on('disconnect', () => {
+      console.log('WebSocket disconnected');
+      setSocket(null);
     });
   };
 
@@ -311,15 +196,6 @@ export default function ScriptsPage() {
       Swal.fire({
         title: 'No Servers Selected',
         text: 'Please select at least one server',
-        icon: 'warning'
-      });
-      return false;
-    }
-
-    if (connectionStatus !== 'connected') {
-      Swal.fire({
-        title: 'Connection Not Available',
-        text: 'WebSocket connection is not established. Please wait for connection or refresh the page.',
         icon: 'warning'
       });
       return false;
@@ -429,30 +305,9 @@ export default function ScriptsPage() {
         {/* Header */}
         <div className="mb-8">
           <h1 className="text-2xl font-bold text-gray-900">Script Runner</h1>
-          <div className="flex items-center justify-between">
-            <p className="mt-1 text-sm text-gray-500">
-              Execute scripts on multiple servers simultaneously
-            </p>
-            
-            {/* Connection Status Indicator */}
-            <div className="flex items-center space-x-2">
-              <div className={`w-3 h-3 rounded-full ${
-                connectionStatus === 'connected' ? 'bg-green-500' :
-                connectionStatus === 'connecting' ? 'bg-yellow-500 animate-pulse' :
-                'bg-red-500'
-              }`}></div>
-              <span className="text-sm text-gray-600">
-                {connectionStatus === 'connected' ? 'Connected' :
-                 connectionStatus === 'connecting' ? 'Connecting...' :
-                 'Disconnected'}
-              </span>
-              {isCloudflareProxy && (
-                <span className="text-xs text-blue-600 bg-blue-100 px-2 py-1 rounded">
-                  Cloudflare
-                </span>
-              )}
-            </div>
-          </div>
+          <p className="mt-1 text-sm text-gray-500">
+            Execute scripts on multiple servers simultaneously
+          </p>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
@@ -497,7 +352,7 @@ systemctl restart nginx"
                     {!isRunning ? (
                       <button
                         onClick={runScript}
-                        disabled={selectedServers.length === 0 || connectionStatus !== 'connected'}
+                        disabled={selectedServers.length === 0}
                         className="btn-primary disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         <Play className="h-4 w-4 mr-2" />
@@ -680,16 +535,6 @@ systemctl restart nginx"
                   </div>
                   <div className="text-xs text-blue-700 mt-1">
                     Scripts will execute simultaneously on all selected servers
-                  </div>
-                </div>
-              )}
-
-              {/* Connection Warning */}
-              {connectionStatus !== 'connected' && (
-                <div className="mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
-                  <div className="text-sm text-yellow-800">
-                    <strong>Connection Issue:</strong> Script execution service is not connected. 
-                    {reconnectAttempts > 0 && ` Retry attempt: ${reconnectAttempts}/5`}
                   </div>
                 </div>
               )}

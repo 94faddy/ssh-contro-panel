@@ -3,7 +3,7 @@ import { withAuth, canAccessServer } from '@/lib/auth';
 import { prisma } from '@/lib/database';
 import { testSSHConnection, closeSSHConnection, updateServerSystemInfo } from '@/lib/ssh';
 import { validateIP, validatePort } from '@/lib/utils';
-import type { ApiResponse, User, Server, UpdateServerData, SystemInfo } from '@/types';
+import type { ApiResponse, User, Server, UpdateServerData } from '@/types';
 
 interface RouteParams {
   params: { id: string };
@@ -60,27 +60,12 @@ export const GET = withAuth(async (request: NextRequest & { user: User }, { para
       }, { status: 404 });
     }
 
-    // Safely parse systemInfo
-    let parsedSystemInfo: SystemInfo | undefined;
-    try {
-      if (server.systemInfo) {
-        if (typeof server.systemInfo === 'string') {
-          parsedSystemInfo = JSON.parse(server.systemInfo) as SystemInfo;
-        } else if (typeof server.systemInfo === 'object' && server.systemInfo !== null) {
-          parsedSystemInfo = server.systemInfo as unknown as SystemInfo;
-        }
-      }
-    } catch (error) {
-      console.error('Failed to parse systemInfo for server', server.id, ':', error);
-      parsedSystemInfo = undefined;
-    }
-
     const serverData: Server = {
       ...server,
       createdAt: server.createdAt.toISOString(),
       updatedAt: server.updatedAt.toISOString(),
       lastChecked: server.lastChecked?.toISOString(),
-      systemInfo: parsedSystemInfo
+      systemInfo: server.systemInfo as any
     };
 
     return NextResponse.json<ApiResponse<Server>>({
@@ -199,27 +184,12 @@ export const PUT = withAuth(async (request: NextRequest & { user: User }, { para
       }
     });
 
-    // Safely parse systemInfo
-    let parsedSystemInfo: SystemInfo | undefined;
-    try {
-      if (updatedServer.systemInfo) {
-        if (typeof updatedServer.systemInfo === 'string') {
-          parsedSystemInfo = JSON.parse(updatedServer.systemInfo) as SystemInfo;
-        } else if (typeof updatedServer.systemInfo === 'object' && updatedServer.systemInfo !== null) {
-          parsedSystemInfo = updatedServer.systemInfo as unknown as SystemInfo;
-        }
-      }
-    } catch (error) {
-      console.error('Failed to parse systemInfo for updated server:', error);
-      parsedSystemInfo = undefined;
-    }
-
     const serverData: Server = {
       ...updatedServer,
       createdAt: updatedServer.createdAt.toISOString(),
       updatedAt: updatedServer.updatedAt.toISOString(),
       lastChecked: updatedServer.lastChecked?.toISOString(),
-      systemInfo: parsedSystemInfo
+      systemInfo: updatedServer.systemInfo as any
     };
 
     return NextResponse.json<ApiResponse<Server>>({
