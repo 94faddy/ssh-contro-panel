@@ -355,12 +355,12 @@ export default function MonitoringPage() {
       if (response.ok) {
         const data: ApiResponse<ServerMonitorData[]> = await response.json();
         if (data.success) {
-          // Generate mock alerts for demo
-          const serversWithAlerts = data.data!.map(server => ({
+          // Generate mock alerts for demo - แก้ไข type casting
+          const serversWithAlerts: ServerMonitorData[] = data.data!.map(server => ({
             ...server,
             alerts: server.status === 'CONNECTED' && Math.random() > 0.7 ? [{
               id: `alert-${server.id}`,
-              type: Math.random() > 0.5 ? 'warning' : 'error' as const,
+              type: (Math.random() > 0.5 ? 'warning' : 'error') as 'warning' | 'error', // แก้ไข type casting
               message: Math.random() > 0.5 ? 
                 'การใช้งาน CPU สูงกว่าปกติ' : 
                 'พื้นที่เก็บข้อมูลเหลือน้อย',
@@ -384,7 +384,7 @@ export default function MonitoringPage() {
     
     try {
       const token = localStorage.getItem('auth_token');
-      const response = await fetch(`/api/servers/${serverId}/status`, {
+      const response = await fetch(`/api/ssh/status/${serverId}`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
 

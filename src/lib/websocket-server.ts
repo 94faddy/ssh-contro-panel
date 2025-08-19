@@ -18,19 +18,61 @@ import { prisma } from './database';
 import { preprocessCommand } from './command-middleware';
 import type { TerminalWSMessage, ScriptWSMessage } from '@/types';
 
-const PORT = process.env.WS_PORT || 3001;
+// อัพเดท PORT เป็น 3126 และรองรับ Cloudflare
+const PORT = process.env.WS_PORT || 3126;
+const DOMAIN = process.env.DOMAIN || 'contro-ssh.cryteksoft.cloud';
+const IS_CLOUDFLARE_PROXY = process.env.CLOUDFLARE_PROXY === 'true';
 
 // Create HTTP server
 const httpServer = createServer();
 
-// Create Socket.IO server
+// สร้าง Socket.IO server ที่รองรับ Cloudflare Proxy
 const io = new SocketIOServer(httpServer, {
   cors: {
-    origin: process.env.NEXTAUTH_URL || "http://localhost:3000",
+    origin: [
+      `https://${DOMAIN}`,
+      `http://${DOMAIN}:3125`,
+      `https://${DOMAIN}:3125`,
+      "http://localhost:3125",
+      "https://localhost:3125"
+    ],
     methods: ["GET", "POST"],
-    credentials: true
+    credentials: true,
+    allowedHeaders: ["*"]
   },
-  transports: ['websocket', 'polling']
+  transports: ['polling', 'websocket'], // เปลี่ยนลำดับ polling ก่อนเพื่อรองรับ Cloudflare
+  allowEIO3: true,
+  pingTimeout: 60000,
+  pingInterval: 25000,
+  upgradeTimeout: 30000,
+  maxHttpBufferSize: 1e6, // 1MB
+  serveClient: false,
+  // เพิ่มการกำหนดค่าสำหรับ Cloudflare Proxy
+  cookie: false,
+  allowRequest: (req, callback) => {
+    // อนุญาตทุก request เมื่อใช้ Cloudflare Proxy
+    if (IS_CLOUDFLARE_PROXY) {
+      callback(null, true);
+      return;
+    }
+    
+    // ตรวจสอบ origin สำหรับการใช้งานปกติ
+    const origin = req.headers.origin;
+    if (!origin) {
+      callback(null, true);
+      return;
+    }
+    
+    const allowedOrigins = [
+      `https://${DOMAIN}`,
+      `http://${DOMAIN}:3125`,
+      `https://${DOMAIN}:3125`,
+      "http://localhost:3125",
+      "https://localhost:3125"
+    ];
+    
+    callback(null, allowedOrigins.includes(origin));
+  }
 });
 
 // Active terminal sessions
@@ -64,21 +106,35 @@ io.use(async (socket, next) => {
     }
 
     socket.data.user = user;
+    console.log(`Authentication successful for user: ${user.email}`);
     next();
   } catch (error) {
+    console.error('Authentication error:', error);
     next(new Error('Authentication failed'));
   }
 });
 
 // Connection handler
 io.on('connection', (socket) => {
-  console.log(`User ${socket.data.user.email} connected`);
+  console.log(`User ${socket.data.user.email} connected from ${socket.handshake.address}`);
+
+  // เพิ่ม heartbeat เพื่อรักษาการเชื่อมต่อ
+  const heartbeatInterval = setInterval(() => {
+    socket.emit('heartbeat', { timestamp: Date.now() });
+  }, 25000);
+
+  socket.on('heartbeat-response', () => {
+    // Client responded to heartbeat
+    console.log(`Heartbeat received from ${socket.data.user.email}`);
+  });
 
   // Handle terminal connection
   socket.on('terminal:connect', async (data: { serverId: number }) => {
     try {
       const { serverId } = data;
       const userId = socket.data.user.id;
+
+      console.log(`Terminal connection request: User ${userId}, Server ${serverId}`);
 
       // Check if user can access this server
       const server = await prisma.server.findUnique({
@@ -171,6 +227,8 @@ io.on('connection', (socket) => {
       // Preprocess command (handle aliases, add safety flags)
       const processedCommand = preprocessCommand(command);
       
+      console.log(`Executing command: ${processedCommand.substring(0, 100)}${processedCommand.length > 100 ? '...' : ''}`);
+      
       // Execute command in shell session
       const result = await executeShellCommand(session.shellSessionId, processedCommand, {
         timeout: 300000 // 5 minutes
@@ -187,7 +245,7 @@ io.on('connection', (socket) => {
         timestamp: new Date().toISOString()
       });
 
-      console.log(`Command executed in session ${sessionId}: ${processedCommand.substring(0, 50)}${processedCommand.length > 50 ? '...' : ''}`);
+      console.log(`Command executed in session ${sessionId}: exit code ${result.exitCode}`);
     } catch (error) {
       console.error('Terminal command error:', error);
       socket.emit('terminal:error', { 
@@ -296,6 +354,8 @@ io.on('connection', (socket) => {
       const { scriptName, command, serverIds } = data;
       const userId = socket.data.user.id;
       const executionId = `${userId}-${Date.now()}`;
+
+      console.log(`Script execution started: ${scriptName} on ${serverIds.length} servers`);
 
       // Validate servers access
       const servers = await prisma.server.findMany({
@@ -527,94 +587,12 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Handle server restart
-  socket.on('server:restart', async (data: { serverId: number }) => {
-    try {
-      const { serverId } = data;
-      const userId = socket.data.user.id;
-
-      const server = await prisma.server.findUnique({
-        where: { id: serverId }
-      });
-
-      if (!server || (server.userId !== userId && socket.data.user.role !== 'ADMIN')) {
-        socket.emit('server:error', { error: 'Access denied to this server' });
-        return;
-      }
-
-      socket.emit('server:restarting', { serverId, serverName: server.name });
-
-      // Execute restart command
-      const result = await executeCommand(serverId, userId, 'sudo reboot', { timeout: 10000 });
-
-      socket.emit('server:restart-initiated', {
-        serverId,
-        serverName: server.name,
-        output: result.stdout,
-        error: result.stderr
-      });
-
-      console.log(`Server restart initiated for ${server.name}`);
-    } catch (error) {
-      console.error('Server restart error:', error);
-      socket.emit('server:error', { 
-        error: 'Failed to restart server',
-        details: error instanceof Error ? error.message : 'Unknown error'
-      });
-    }
-  });
-
-  // Handle real-time logs
-  socket.on('logs:subscribe', async (data: { serverId: number; logType?: string }) => {
-    try {
-      const { serverId, logType } = data;
-      const userId = socket.data.user.id;
-
-      const server = await prisma.server.findUnique({
-        where: { id: serverId }
-      });
-
-      if (!server || (server.userId !== userId && socket.data.user.role !== 'ADMIN')) {
-        socket.emit('logs:error', { error: 'Access denied to this server' });
-        return;
-      }
-
-      // Join logs room
-      socket.join(`logs-${serverId}`);
-
-      // Send recent logs
-      const recentLogs = await prisma.serverLog.findMany({
-        where: {
-          serverId,
-          ...(logType ? { logType: logType as any } : {})
-        },
-        orderBy: { timestamp: 'desc' },
-        take: 50
-      });
-
-      socket.emit('logs:initial', {
-        serverId,
-        logs: recentLogs.reverse()
-      });
-
-      console.log(`User subscribed to logs for server ${server.name}`);
-    } catch (error) {
-      console.error('Logs subscription error:', error);
-      socket.emit('logs:error', { 
-        error: 'Failed to subscribe to logs',
-        details: error instanceof Error ? error.message : 'Unknown error'
-      });
-    }
-  });
-
-  socket.on('logs:unsubscribe', (data: { serverId: number }) => {
-    const { serverId } = data;
-    socket.leave(`logs-${serverId}`);
-  });
-
   // Handle disconnection
-  socket.on('disconnect', () => {
-    console.log(`User ${socket.data.user.email} disconnected`);
+  socket.on('disconnect', (reason) => {
+    console.log(`User ${socket.data.user.email} disconnected: ${reason}`);
+
+    // Clear heartbeat interval
+    clearInterval(heartbeatInterval);
 
     // Clean up terminal sessions
     if (socket.data.terminalSession) {
@@ -631,6 +609,16 @@ io.on('connection', (socket) => {
       socket.leave(room);
     });
   });
+
+  // Handle connection errors
+  socket.on('error', (error) => {
+    console.error(`Socket error for user ${socket.data.user.email}:`, error);
+  });
+});
+
+// เพิ่ม error handling สำหรับ Socket.IO server
+io.engine.on('connection_error', (err) => {
+  console.error('Socket.IO connection error:', err);
 });
 
 // Broadcast new logs to subscribers
@@ -665,7 +653,10 @@ setInterval(() => {
 
 // Start server
 httpServer.listen(PORT, () => {
-  console.log(`WebSocket server running on port ${PORT}`);
+  console.log(`🚀 WebSocket server running on port ${PORT}`);
+  console.log(`🌐 Domain: ${DOMAIN}`);
+  console.log(`☁️  Cloudflare Proxy: ${IS_CLOUDFLARE_PROXY ? 'Enabled' : 'Disabled'}`);
+  console.log(`📡 Available transports: polling, websocket`);
 });
 
 // Graceful shutdown
@@ -687,6 +678,15 @@ process.on('SIGINT', () => {
     console.log('WebSocket server closed');
     process.exit(0);
   });
+});
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
 });
 
 export { io };

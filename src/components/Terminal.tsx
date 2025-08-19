@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { X, Maximize2, Minimize2, RotateCcw, Copy } from 'lucide-react';
+import { X, Maximize2, Minimize2, RotateCcw, Copy, Wifi, WifiOff } from 'lucide-react';
 import { io, Socket } from 'socket.io-client';
 import type { TerminalProps } from '@/types';
 
@@ -12,6 +12,26 @@ interface TerminalOutput {
   timestamp: Date;
   command?: string;
   currentDir?: string;
+}
+
+// ฟังก์ชันสำหรับสร้าง WebSocket URL ที่รองรับ Cloudflare Proxy
+function getWebSocketURL(): string {
+  if (typeof window === 'undefined') return '';
+  
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const hostname = window.location.hostname;
+  
+  // ตรวจสอบว่าใช้ Cloudflare Proxy หรือไม่
+  const isCloudflareProxy = hostname.includes('.cloud') || hostname.includes('cloudflare');
+  
+  if (isCloudflareProxy) {
+    // สำหรับ Cloudflare Proxy ใช้ HTTPS/HTTP endpoint
+    return `${window.location.protocol}//${hostname}`;
+  } else {
+    // สำหรับการใช้งานปกติ
+    const wsPort = process.env.NEXT_PUBLIC_WS_PORT || '3126';
+    return `${protocol}//${hostname}:${wsPort}`;
+  }
 }
 
 export default function Terminal({ serverId, serverName, onClose }: TerminalProps) {
@@ -29,16 +49,37 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
   const [tabCompletions, setTabCompletions] = useState<string[]>([]);
   const [showCompletions, setShowCompletions] = useState(false);
   const [completionIndex, setCompletionIndex] = useState(-1);
+  const [connectionStatus, setConnectionStatus] = useState<'disconnected' | 'connecting' | 'connected' | 'error'>('disconnected');
+  const [isCloudflareProxy, setIsCloudflareProxy] = useState(false);
+  const [reconnectAttempts, setReconnectAttempts] = useState(0);
   
   const terminalRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const completionRef = useRef<HTMLDivElement>(null);
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  // ตรวจสอบว่าใช้ Cloudflare Proxy หรือไม่
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const hostname = window.location.hostname;
+      const isProxy = hostname.includes('.cloud') || hostname.includes('cloudflare');
+      setIsCloudflareProxy(isProxy);
+      console.log('Terminal - Cloudflare Proxy detected:', isProxy);
+    }
+  }, []);
 
   useEffect(() => {
     connectToServer();
     return () => {
       if (socket) {
         socket.disconnect();
+      }
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
+      if (heartbeatIntervalRef.current) {
+        clearInterval(heartbeatIntervalRef.current);
       }
     };
   }, [serverId]);
@@ -57,38 +98,146 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
     }
   }, [isConnected, isCommandRunning]);
 
-  const connectToServer = () => {
+  // Start heartbeat
+  const startHeartbeat = useCallback((socket: Socket) => {
+    if (heartbeatIntervalRef.current) {
+      clearInterval(heartbeatIntervalRef.current);
+    }
+
+    heartbeatIntervalRef.current = setInterval(() => {
+      if (socket.connected) {
+        socket.emit('heartbeat-response');
+      }
+    }, 25000);
+  }, []);
+
+  // Stop heartbeat
+  const stopHeartbeat = useCallback(() => {
+    if (heartbeatIntervalRef.current) {
+      clearInterval(heartbeatIntervalRef.current);
+      heartbeatIntervalRef.current = null;
+    }
+  }, []);
+
+  const connectToServer = useCallback(() => {
+    if (isConnecting || isConnected) return;
+
     setIsConnecting(true);
+    setConnectionStatus('connecting');
     
     const token = localStorage.getItem('auth_token');
     if (!token) {
       addOutput('system', 'Authentication token not found', 'error');
       setIsConnecting(false);
+      setConnectionStatus('error');
       return;
     }
 
-    // Connect to WebSocket server
-    const newSocket = io(`${window.location.protocol}//${window.location.hostname}:3001`, {
-      auth: { token },
-      transports: ['websocket', 'polling']
-    });
+    // Clear any existing reconnection timeout
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
 
+    const wsUrl = getWebSocketURL();
+    console.log('Terminal - Connecting to WebSocket:', wsUrl);
+    console.log('Terminal - Cloudflare Proxy mode:', isCloudflareProxy);
+
+    // สร้าง Socket.IO connection ที่รองรับ Cloudflare Proxy
+    const socketOptions: any = {
+      auth: { token },
+      forceNew: true,
+      timeout: 20000,
+      reconnection: true,
+      reconnectionAttempts: 5,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
+      maxReconnectionAttempts: 5,
+      randomizationFactor: 0.5
+    };
+
+    if (isCloudflareProxy) {
+      // สำหรับ Cloudflare Proxy ใช้ polling เป็นหลัก
+      socketOptions.transports = ['polling', 'websocket'];
+      socketOptions.upgrade = true;
+      socketOptions.rememberUpgrade = false;
+      socketOptions.pingTimeout = 60000;
+      socketOptions.pingInterval = 25000;
+    } else {
+      // สำหรับการใช้งานปกติ
+      socketOptions.transports = ['websocket', 'polling'];
+      socketOptions.upgrade = true;
+    }
+
+    const newSocket = io(wsUrl, socketOptions);
+
+    // Connection events
     newSocket.on('connect', () => {
-      console.log('WebSocket connected');
+      console.log('Terminal - Socket.IO connected with transport:', newSocket.io.engine.transport.name);
       setSocket(newSocket);
-      
-      // Request terminal connection
+      setConnectionStatus('connected');
+      setReconnectAttempts(0);
+      startHeartbeat(newSocket);
       newSocket.emit('terminal:connect', { serverId });
     });
 
-    newSocket.on('disconnect', () => {
-      console.log('WebSocket disconnected');
+    newSocket.on('connect_error', (error) => {
+      console.error('Terminal - Socket.IO connection error:', error);
+      setConnectionStatus('error');
+      const attempts = reconnectAttempts + 1;
+      setReconnectAttempts(attempts);
+      
+      if (attempts >= 5) {
+        addOutput('error', 'Failed to connect after multiple attempts. Please check your internet connection.');
+        setIsConnecting(false);
+        return;
+      }
+      
+      addOutput('system', `Connection attempt ${attempts}/5 failed. Retrying...`);
+    });
+
+    newSocket.on('disconnect', (reason) => {
+      console.log('Terminal - Socket.IO disconnected:', reason);
+      stopHeartbeat();
       setIsConnected(false);
       setSessionId(null);
       setIsCommandRunning(false);
-      addOutput('system', 'Connection lost', 'error');
+      setConnectionStatus('disconnected');
+      addOutput('system', `Connection lost: ${reason}`);
+
+      // Auto-reconnect only for network issues
+      if (reason === 'io server disconnect' || reason === 'ping timeout' || reason === 'transport close') {
+        reconnectTimeoutRef.current = setTimeout(() => {
+          if (reconnectAttempts < 3) {
+            addOutput('system', 'Attempting to reconnect...');
+            connectToServer();
+          }
+        }, 2000 + (reconnectAttempts * 1000));
+      }
     });
 
+    newSocket.on('reconnect', (attemptNumber) => {
+      console.log('Terminal - Socket.IO reconnected after', attemptNumber, 'attempts');
+      addOutput('system', 'Reconnected successfully');
+      setReconnectAttempts(0);
+      setConnectionStatus('connected');
+    });
+
+    // Heartbeat handler
+    newSocket.on('heartbeat', () => {
+      newSocket.emit('heartbeat-response');
+    });
+
+    // Transport upgrade events
+    newSocket.io.engine.on('upgrade', () => {
+      console.log('Terminal - Upgraded to transport:', newSocket.io.engine.transport.name);
+    });
+
+    newSocket.io.engine.on('upgradeError', (error) => {
+      console.log('Terminal - Upgrade error:', error);
+    });
+
+    // Terminal events
     newSocket.on('terminal:connected', (data: { 
       sessionId: string; 
       serverName: string; 
@@ -98,6 +247,7 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
       setSessionId(data.sessionId);
       setIsConnected(true);
       setIsConnecting(false);
+      setConnectionStatus('connected');
       setCurrentDir(data.currentDir || '/');
       addOutput('system', `Connected to ${data.serverName}`, 'system');
       addOutput('system', 'Welcome to SSH Terminal! Type your commands below.', 'system');
@@ -163,14 +313,9 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
       addOutput('error', `Error: ${data.error}${data.details ? ` - ${data.details}` : ''}`, 'error');
       setIsConnecting(false);
       setIsCommandRunning(false);
+      setConnectionStatus('error');
     });
-
-    newSocket.on('connect_error', (error) => {
-      console.error('WebSocket connection error:', error);
-      addOutput('error', 'Failed to connect to terminal server', 'error');
-      setIsConnecting(false);
-    });
-  };
+  }, [serverId, isConnecting, isConnected, isCloudflareProxy, reconnectAttempts, startHeartbeat, stopHeartbeat]);
 
   const addOutput = (type: TerminalOutput['type'], content: string, displayType: string = type, newLine: boolean = true) => {
     const output: TerminalOutput = {
@@ -342,6 +487,7 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
     }
     setOutputs([]);
     setIsCommandRunning(false);
+    setReconnectAttempts(0);
     connectToServer();
   };
 
@@ -403,6 +549,32 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
     }
   };
 
+  const getConnectionIcon = () => {
+    switch (connectionStatus) {
+      case 'connected':
+        return <Wifi className="h-4 w-4 text-green-500" />;
+      case 'connecting':
+        return <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-yellow-500"></div>;
+      case 'error':
+        return <WifiOff className="h-4 w-4 text-red-500" />;
+      default:
+        return <WifiOff className="h-4 w-4 text-gray-500" />;
+    }
+  };
+
+  const getConnectionText = () => {
+    switch (connectionStatus) {
+      case 'connected':
+        return 'Connected';
+      case 'connecting':
+        return 'Connecting...';
+      case 'error':
+        return 'Connection Error';
+      default:
+        return 'Disconnected';
+    }
+  };
+
   return (
     <div className={`bg-white shadow-xl rounded-lg overflow-hidden ${isMaximized ? 'fixed inset-4 z-50' : 'relative'} transition-all duration-200`}>
       {/* Header */}
@@ -415,25 +587,40 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
           </div>
           <div className="text-white font-medium">
             Terminal - {serverName}
-            {isConnected && (
-              <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
-                Connected
+            <div className="flex items-center space-x-2 mt-1">
+              {getConnectionIcon()}
+              <span className={`text-xs ${
+                connectionStatus === 'connected' ? 'text-green-400' :
+                connectionStatus === 'connecting' ? 'text-yellow-400' :
+                connectionStatus === 'error' ? 'text-red-400' :
+                'text-gray-400'
+              }`}>
+                {getConnectionText()}
               </span>
-            )}
-            {isConnecting && (
-              <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-800">
-                Connecting...
-              </span>
-            )}
-            {isCommandRunning && (
-              <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">
-                Running...
-              </span>
-            )}
+              {isCloudflareProxy && (
+                <span className="text-xs text-blue-400 bg-blue-900 px-2 py-0.5 rounded">
+                  CF Proxy
+                </span>
+              )}
+              {reconnectAttempts > 0 && (
+                <span className="text-xs text-yellow-400">
+                  Retry: {reconnectAttempts}/5
+                </span>
+              )}
+            </div>
           </div>
         </div>
         
         <div className="flex items-center space-x-2">
+          {connectionStatus === 'error' && (
+            <button
+              onClick={reconnect}
+              className="p-1 text-gray-400 hover:text-white rounded"
+              title="Reconnect"
+            >
+              <RotateCcw className="h-4 w-4" />
+            </button>
+          )}
           <button
             onClick={clearTerminal}
             className="p-1 text-gray-400 hover:text-white rounded"
@@ -475,7 +662,9 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
           
           {!isConnected && !isConnecting && (
             <div className="text-center py-8">
-              <div className="text-red-400 mb-4">Connection failed</div>
+              <div className="text-red-400 mb-4">
+                {connectionStatus === 'error' ? 'Connection failed' : 'Disconnected'}
+              </div>
               <button
                 onClick={reconnect}
                 className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
@@ -540,6 +729,7 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
         <div className="bg-gray-800 px-4 py-2 text-xs text-gray-400 border-t border-gray-700">
           Session: {sessionId} | Working Dir: {currentDir} | 
           Use ↑↓ arrows for command history | Tab for completion | Ctrl+C to interrupt
+          {isCloudflareProxy && ' | Running via Cloudflare Proxy'}
         </div>
       )}
     </div>

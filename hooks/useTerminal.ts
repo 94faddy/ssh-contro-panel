@@ -63,6 +63,26 @@ const defaultConfig: TerminalConfig = {
   pasteWithMiddleClick: false
 };
 
+// ฟังก์ชันสำหรับสร้าง WebSocket URL ที่รองรับ Cloudflare Proxy
+function getWebSocketURL(): string {
+  if (typeof window === 'undefined') return '';
+  
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const hostname = window.location.hostname;
+  
+  // ตรวจสอบว่าใช้ Cloudflare Proxy หรือไม่
+  const isCloudflareProxy = hostname.includes('.cloud') || hostname.includes('cloudflare');
+  
+  if (isCloudflareProxy) {
+    // สำหรับ Cloudflare Proxy ใช้ polling เป็นหลัก
+    return `${window.location.protocol}//${hostname}`;
+  } else {
+    // สำหรับการใช้งานปกติ
+    const wsPort = process.env.NEXT_PUBLIC_WS_PORT || '3126';
+    return `${protocol}//${hostname}:${wsPort}`;
+  }
+}
+
 export function useTerminal({ 
   serverId, 
   serverName, 
@@ -88,10 +108,24 @@ export function useTerminal({
   const [tabCompletions, setTabCompletions] = useState<string[]>([]);
   const [showCompletions, setShowCompletions] = useState(false);
   const [completionIndex, setCompletionIndex] = useState(-1);
+  const [reconnectAttempts, setReconnectAttempts] = useState(0);
+  const [isCloudflareProxy, setIsCloudflareProxy] = useState(false);
   
   const terminalRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const configRef = useRef<TerminalConfig>({ ...defaultConfig, ...config });
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  // ตรวจสอบว่าใช้ Cloudflare Proxy หรือไม่
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const hostname = window.location.hostname;
+      const isProxy = hostname.includes('.cloud') || hostname.includes('cloudflare');
+      setIsCloudflareProxy(isProxy);
+      console.log('Cloudflare Proxy detected:', isProxy);
+    }
+  }, []);
   
   // Update config when it changes
   useEffect(() => {
@@ -135,6 +169,27 @@ export function useTerminal({
     }));
   }, []);
 
+  // Start heartbeat
+  const startHeartbeat = useCallback((socket: Socket) => {
+    if (heartbeatIntervalRef.current) {
+      clearInterval(heartbeatIntervalRef.current);
+    }
+
+    heartbeatIntervalRef.current = setInterval(() => {
+      if (socket.connected) {
+        socket.emit('heartbeat-response');
+      }
+    }, 25000);
+  }, []);
+
+  // Stop heartbeat
+  const stopHeartbeat = useCallback(() => {
+    if (heartbeatIntervalRef.current) {
+      clearInterval(heartbeatIntervalRef.current);
+      heartbeatIntervalRef.current = null;
+    }
+  }, []);
+
   const connect = useCallback(() => {
     if (state.isConnecting || state.isConnected) return;
     
@@ -148,27 +203,103 @@ export function useTerminal({
       return;
     }
 
-    const newSocket = io(`${window.location.protocol}//${window.location.hostname}:3001`, {
-      auth: { token },
-      transports: ['websocket', 'polling']
-    });
+    // Clear any existing reconnection timeout
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
 
+    const wsUrl = getWebSocketURL();
+    console.log('Connecting to WebSocket:', wsUrl);
+    console.log('Cloudflare Proxy mode:', isCloudflareProxy);
+
+    // สร้าง Socket.IO connection ที่รองรับ Cloudflare Proxy
+    const socketOptions: any = {
+      auth: { token },
+      forceNew: true,
+      timeout: 20000,
+      reconnection: true,
+      reconnectionAttempts: 5,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
+      maxReconnectionAttempts: 5,
+      randomizationFactor: 0.5
+    };
+
+    if (isCloudflareProxy) {
+      // สำหรับ Cloudflare Proxy ใช้ polling เป็นหลัก
+      socketOptions.transports = ['polling', 'websocket'];
+      socketOptions.upgrade = true;
+      socketOptions.rememberUpgrade = false;
+      socketOptions.pingTimeout = 60000;
+      socketOptions.pingInterval = 25000;
+    } else {
+      // สำหรับการใช้งานปกติ
+      socketOptions.transports = ['websocket', 'polling'];
+      socketOptions.upgrade = true;
+    }
+
+    const newSocket = io(wsUrl, socketOptions);
+
+    // Connection events
     newSocket.on('connect', () => {
+      console.log('Socket.IO connected with transport:', newSocket.io.engine.transport.name);
       setSocket(newSocket);
+      setReconnectAttempts(0);
+      startHeartbeat(newSocket);
       newSocket.emit('terminal:connect', { serverId });
     });
 
-    newSocket.on('disconnect', () => {
+    newSocket.on('connect_error', (error) => {
+      console.error('Socket.IO connection error:', error);
+      const attempts = reconnectAttempts + 1;
+      setReconnectAttempts(attempts);
+      
+      if (attempts >= 5) {
+        addOutput('error', 'Failed to connect after multiple attempts. Please check your internet connection.');
+        setState(prev => ({ ...prev, isConnecting: false }));
+        onError?.('Connection failed');
+        return;
+      }
+      
+      addOutput('system', `Connection attempt ${attempts}/5 failed. Retrying...`);
+    });
+
+    newSocket.on('disconnect', (reason) => {
+      console.log('Socket.IO disconnected:', reason);
+      stopHeartbeat();
       setState(prev => ({
         ...prev,
         isConnected: false,
         sessionId: null,
         isCommandRunning: false
       }));
-      addOutput('system', 'Connection lost');
+      addOutput('system', `Connection lost: ${reason}`);
       onDisconnect?.();
+
+      // Auto-reconnect only for network issues
+      if (reason === 'io server disconnect' || reason === 'ping timeout' || reason === 'transport close') {
+        reconnectTimeoutRef.current = setTimeout(() => {
+          if (reconnectAttempts < 3) {
+            addOutput('system', 'Attempting to reconnect...');
+            connect();
+          }
+        }, 2000 + (reconnectAttempts * 1000));
+      }
     });
 
+    newSocket.on('reconnect', (attemptNumber) => {
+      console.log('Socket.IO reconnected after', attemptNumber, 'attempts');
+      addOutput('system', 'Reconnected successfully');
+      setReconnectAttempts(0);
+    });
+
+    // Heartbeat handler
+    newSocket.on('heartbeat', () => {
+      newSocket.emit('heartbeat-response');
+    });
+
+    // Terminal events
     newSocket.on('terminal:connected', (data: { 
       sessionId: string; 
       serverName: string; 
@@ -241,14 +372,25 @@ export function useTerminal({
       onError?.(data.error);
     });
 
-    newSocket.on('connect_error', (error) => {
-      addOutput('error', 'Failed to connect to terminal server');
-      setState(prev => ({ ...prev, isConnecting: false }));
-      onError?.('Connection failed');
+    // Transport upgrade events
+    newSocket.io.engine.on('upgrade', () => {
+      console.log('Upgraded to transport:', newSocket.io.engine.transport.name);
     });
-  }, [serverId, state.isConnecting, state.isConnected, addOutput, onConnect, onDisconnect, onError]);
+
+    newSocket.io.engine.on('upgradeError', (error) => {
+      console.log('Upgrade error:', error);
+    });
+
+  }, [serverId, state.isConnecting, state.isConnected, addOutput, onConnect, onDisconnect, onError, isCloudflareProxy, reconnectAttempts, startHeartbeat, stopHeartbeat]);
 
   const disconnect = useCallback(() => {
+    // Clear timeouts and intervals
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+    stopHeartbeat();
+
     if (socket) {
       if (state.sessionId) {
         socket.emit('terminal:disconnect', { sessionId: state.sessionId });
@@ -264,7 +406,9 @@ export function useTerminal({
       sessionId: null,
       isCommandRunning: false
     }));
-  }, [socket, state.sessionId]);
+
+    setReconnectAttempts(0);
+  }, [socket, state.sessionId, stopHeartbeat]);
 
   const executeCommand = useCallback((command: string) => {
     if (!command.trim() || !socket || !state.sessionId || state.isCommandRunning) return;
