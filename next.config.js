@@ -21,12 +21,10 @@ const nextConfig = {
 
     return config;
   },
+  // ลบบรรทัดนี้ออก: output: 'standalone',
   
   env: {
-    WS_PORT: process.env.WS_PORT || '3126',
-    DOMAIN: process.env.DOMAIN || 'contro-ssh.cryteksoft.cloud',
-    CLOUDFLARE_PROXY: process.env.CLOUDFLARE_PROXY || 'true',
-    FORCE_HTTPS: process.env.FORCE_HTTPS || 'true',
+    WS_PORT: process.env.WS_PORT || '3001',
   },
 
   async headers() {
@@ -46,15 +44,6 @@ const nextConfig = {
             key: 'Referrer-Policy',
             value: 'origin-when-cross-origin',
           },
-          // เพิ่ม headers สำหรับ Cloudflare Proxy
-          {
-            key: 'X-Forwarded-Proto',
-            value: 'https',
-          },
-          {
-            key: 'CF-Connecting-IP',
-            value: 'trusted',
-          },
         ],
       },
     ];
@@ -68,18 +57,6 @@ const nextConfig = {
         permanent: false,
       },
     ];
-  },
-
-  // เพิ่มการกำหนดค่า server สำหรับ Cloudflare
-  serverRuntimeConfig: {
-    port: process.env.PORT || 3125,
-    wsPort: process.env.WS_PORT || 3126,
-  },
-
-  publicRuntimeConfig: {
-    domain: process.env.DOMAIN || 'contro-ssh.cryteksoft.cloud',
-    wsPort: process.env.WS_PORT || 3126,
-    cloudflareProxy: process.env.CLOUDFLARE_PROXY === 'true',
   },
 }
 
