@@ -1,5 +1,6 @@
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
+import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from './database';
 import type { User } from '@/types';
 

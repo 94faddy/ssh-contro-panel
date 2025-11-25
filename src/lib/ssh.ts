@@ -84,7 +84,7 @@ export async function getSSHConnection(
     const existingConnection = sshConnections.get(connectionKey)!;
     try {
       // Test if connection is still alive
-      await existingConnection.execCommand('echo "test"', [], { execOptions: { timeout: 5000 } });
+      await existingConnection.execCommand('echo "test"');
       return existingConnection;
     } catch {
       // Connection is dead, remove it
@@ -247,7 +247,8 @@ export async function executeShellCommandStreaming(
       LC_ALL: 'en_US.UTF-8',
       DEBIAN_FRONTEND: 'noninteractive',
       COLUMNS: '120',
-      LINES: '30'
+      LINES: '30',
+      NODE_ENV: process.env.NODE_ENV || 'production'
     };
 
     // Build environment string
@@ -421,15 +422,9 @@ export async function executeShellCommand(
     // Prepare command with proper environment and directory
     const fullCommand = `cd "${session.cwd}" && ${envString} ${command}`;
     
-    const result = await session.ssh.execCommand(fullCommand, [], {
+    const result = await session.ssh.execCommand(fullCommand, {
       execOptions: {
-        timeout: options.timeout || 30000,
-        env: envVars,
-        // Enable pseudo-TTY for better command support
-        pty: {
-          cols: 120,
-          rows: 30
-        }
+        env: envVars as any
       }
     });
 
@@ -753,10 +748,9 @@ export async function executeCommand(
       LC_ALL: 'en_US.UTF-8'
     };
 
-    const result = await ssh.execCommand(command, [], {
+    const result = await ssh.execCommand(command, {
       execOptions: {
-        timeout: options.timeout || 30000,
-        env: envVars
+        env: envVars as any
       },
       cwd: options.cwd,
     });
@@ -948,13 +942,14 @@ export function cleanupSSHConnections(): void {
 
 // Cleanup all connections on shutdown
 export async function disposeAllSSHConnections(): Promise<void> {
-  const promises = Array.from(sshConnections.values()).map(ssh => {
-    return ssh.dispose().catch(err => {
+  for (const ssh of sshConnections.values()) {
+    try {
+      ssh.dispose();
+    } catch (err) {
       console.error('Error disposing SSH connection:', err);
-    });
-  });
+    }
+  }
 
-  await Promise.all(promises);
   sshConnections.clear();
   shellSessions.clear();
 }

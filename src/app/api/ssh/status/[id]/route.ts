@@ -74,7 +74,7 @@ export const GET = withAuth(async (request: NextRequest & { user: User }, { para
         serverName: updatedServer!.name,
         status: updatedServer!.status,
         lastChecked: updatedServer!.lastChecked?.toISOString(),
-        systemInfo: updatedServer!.systemInfo as SystemInfo
+        systemInfo: updatedServer!.systemInfo as unknown as SystemInfo
       },
       message: 'Server status updated'
     });

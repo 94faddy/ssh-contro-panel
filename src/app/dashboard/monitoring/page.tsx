@@ -360,7 +360,7 @@ export default function MonitoringPage() {
             ...server,
             alerts: server.status === 'CONNECTED' && Math.random() > 0.7 ? [{
               id: `alert-${server.id}`,
-              type: Math.random() > 0.5 ? 'warning' : 'error' as const,
+              type: (Math.random() > 0.5 ? 'warning' : 'error') as 'warning' | 'error',
               message: Math.random() > 0.5 ? 
                 'การใช้งาน CPU สูงกว่าปกติ' : 
                 'พื้นที่เก็บข้อมูลเหลือน้อย',

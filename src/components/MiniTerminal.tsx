@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useCallback, forwardRef, useImperativeHandle } from 'react';
+import 'xterm/css/xterm.css';
 
 export interface MiniTerminalRef {
   write: (data: string) => void;
@@ -66,8 +67,6 @@ const MiniTerminal = forwardRef<MiniTerminalRef, MiniTerminalProps>(({
       try {
         const { Terminal } = await import('xterm');
         const { FitAddon } = await import('xterm-addon-fit');
-        
-        await import('xterm/css/xterm.css');
 
         if (isCleanedUp || !containerRef.current) {
           return;

@@ -396,21 +396,7 @@ io.on('connection', (socket) => {
       let finalCommand: string;
       let finalScriptName: string;
 
-      // ตรวจสอบว่าใช้แบบไหน - scriptId หรือ command โดยตรง
-      if (scriptId) {
-        // แบบเดิม - ใช้ scriptId ดึงจาก database
-        const script = await prisma.script.findUnique({
-          where: { id: scriptId },
-        });
-
-        if (!script || script.userId !== userId) {
-          socket.emit('script:error', { executionId: execId, error: 'Script not found' });
-          return;
-        }
-
-        finalCommand = script.content;
-        finalScriptName = script.name;
-      } else if (command && scriptName) {
+      if (command && scriptName) {
         // แบบใหม่ - ใช้ command โดยตรงจากหน้า Scripts
         finalCommand = command;
         finalScriptName = scriptName;

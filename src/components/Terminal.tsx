@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { X, RotateCcw, Download, Loader2 } from 'lucide-react';
 import { io, Socket } from 'socket.io-client';
 import type { TerminalProps } from '@/types';
+import 'xterm/css/xterm.css';
 
 // Helper function to get WebSocket URL
 function getWebSocketUrl(): string {
@@ -196,9 +197,6 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
       const { Terminal } = await import('xterm');
       const { FitAddon } = await import('xterm-addon-fit');
       const { WebLinksAddon } = await import('xterm-addon-web-links');
-
-      // Import CSS
-      await import('xterm/css/xterm.css');
 
       // ตรวจสอบว่ายังไม่ถูก cleanup
       if (isCleanedUp || !terminalContainerRef.current) {
