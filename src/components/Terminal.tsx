@@ -29,13 +29,11 @@ function getWebSocketUrl(): string {
 }
 
 export default function Terminal({ serverId, serverName, onClose }: TerminalProps) {
-  const [socket, setSocket] = useState<Socket | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [isMaximized, setIsMaximized] = useState(false);
   const [currentDir, setCurrentDir] = useState('~');
-  const [isXtermReady, setIsXtermReady] = useState(false);
   
   const terminalContainerRef = useRef<HTMLDivElement>(null);
   const terminalWrapperRef = useRef<HTMLDivElement>(null);
@@ -43,12 +41,15 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
   const fitAddonRef = useRef<any>(null);
   const socketRef = useRef<Socket | null>(null);
   const sessionIdRef = useRef<string | null>(null);
+  
+  // ป้องกันการ initialize ซ้ำ
+  const isInitializedRef = useRef(false);
+  const isConnectingRef = useRef(false);
 
-  // Fit terminal function with debounce
+  // Fit terminal function
   const fitTerminal = useCallback(() => {
     if (fitAddonRef.current && xtermRef.current && terminalContainerRef.current) {
       try {
-        // Make sure container has dimensions before fitting
         const container = terminalContainerRef.current;
         if (container.offsetWidth > 0 && container.offsetHeight > 0) {
           fitAddonRef.current.fit();
@@ -59,11 +60,138 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
     }
   }, []);
 
-  // Initialize xterm.js
+  // Connect to server function
+  const connectToServer = useCallback(() => {
+    // ป้องกันการเชื่อมต่อซ้ำ
+    if (isConnectingRef.current || socketRef.current?.connected) {
+      console.log('Already connecting or connected, skipping...');
+      return;
+    }
+    
+    isConnectingRef.current = true;
+    setIsConnecting(true);
+    
+    const token = localStorage.getItem('auth_token');
+    if (!token) {
+      if (xtermRef.current) {
+        xtermRef.current.writeln('\x1b[31mError: Authentication token not found\x1b[0m');
+        xtermRef.current.write('\x1b[?25h');
+      }
+      setIsConnecting(false);
+      isConnectingRef.current = false;
+      return;
+    }
+
+    const wsUrl = getWebSocketUrl();
+    console.log('Terminal connecting to WebSocket:', wsUrl);
+
+    const newSocket = io(wsUrl, {
+      auth: { token },
+      transports: ['websocket', 'polling'],
+      reconnectionAttempts: 5,
+      reconnectionDelay: 1000,
+      timeout: 20000,
+    });
+
+    newSocket.on('connect', () => {
+      console.log('WebSocket connected');
+      socketRef.current = newSocket;
+      
+      // Get terminal dimensions
+      const cols = xtermRef.current?.cols || 120;
+      const rows = xtermRef.current?.rows || 30;
+      
+      // Request PTY terminal connection
+      newSocket.emit('terminal:connect', { 
+        serverId,
+        cols,
+        rows
+      });
+    });
+
+    newSocket.on('terminal:connected', (data: { sessionId: string; serverName: string; currentDir: string }) => {
+      console.log('Terminal connected:', data);
+      setSessionId(data.sessionId);
+      sessionIdRef.current = data.sessionId;
+      setCurrentDir(data.currentDir || '~');
+      setIsConnected(true);
+      setIsConnecting(false);
+      isConnectingRef.current = false;
+      
+      if (xtermRef.current) {
+        xtermRef.current.writeln('');
+        xtermRef.current.writeln(`\x1b[1;32mConnected to ${data.serverName}\x1b[0m`);
+        xtermRef.current.writeln(`\x1b[90mworking directory: ${data.currentDir}\x1b[0m`);
+        xtermRef.current.writeln('');
+        xtermRef.current.write('\x1b[?25h');
+      }
+      
+      // Fit after connected
+      setTimeout(fitTerminal, 100);
+    });
+
+    // Handle PTY data (real terminal output)
+    newSocket.on('terminal:data', (data: { sessionId: string; data: string }) => {
+      if (xtermRef.current && data.data) {
+        xtermRef.current.write(data.data);
+      }
+    });
+
+    newSocket.on('terminal:error', (data: { error: string }) => {
+      console.error('Terminal error:', data.error);
+      if (xtermRef.current) {
+        xtermRef.current.writeln(`\x1b[31mError: ${data.error}\x1b[0m`);
+        xtermRef.current.write('\x1b[?25h');
+      }
+      setIsConnecting(false);
+      isConnectingRef.current = false;
+    });
+
+    newSocket.on('terminal:closed', () => {
+      console.log('Terminal session closed');
+      setIsConnected(false);
+      if (xtermRef.current) {
+        xtermRef.current.writeln('');
+        xtermRef.current.writeln('\x1b[33mSession closed by server\x1b[0m');
+      }
+    });
+
+    newSocket.on('connect_error', (error: Error) => {
+      console.error('Connection error:', error);
+      if (xtermRef.current) {
+        xtermRef.current.writeln(`\x1b[31mConnection failed: ${error.message}\x1b[0m`);
+        xtermRef.current.write('\x1b[?25h');
+      }
+      setIsConnecting(false);
+      isConnectingRef.current = false;
+    });
+
+    newSocket.on('disconnect', (reason: string) => {
+      console.log('Disconnected:', reason);
+      setIsConnected(false);
+      isConnectingRef.current = false;
+      if (xtermRef.current) {
+        xtermRef.current.writeln('');
+        xtermRef.current.writeln(`\x1b[33mDisconnected: ${reason}\x1b[0m`);
+      }
+    });
+
+  }, [serverId, fitTerminal]);
+
+  // Initialize xterm.js - ใช้ useEffect แยกและมี cleanup ที่ดี
   useEffect(() => {
+    // ป้องกันการ initialize ซ้ำ
+    if (isInitializedRef.current) {
+      console.log('Terminal already initialized, skipping...');
+      return;
+    }
+    
+    isInitializedRef.current = true;
+    
     let terminal: any = null;
     let fitAddon: any = null;
     let resizeObserver: ResizeObserver | null = null;
+    let isCleanedUp = false;
 
     const initXterm = async () => {
       // Dynamic import xterm.js
@@ -74,7 +202,10 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
       // Import CSS
       await import('xterm/css/xterm.css');
 
-      if (!terminalContainerRef.current) return;
+      // ตรวจสอบว่ายังไม่ถูก cleanup
+      if (isCleanedUp || !terminalContainerRef.current) {
+        return;
+      }
 
       // Create terminal with optimized settings
       terminal = new Terminal({
@@ -128,8 +259,9 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
 
       // Initial fit with delay to ensure container is ready
       setTimeout(() => {
-        fitAddon.fit();
-        setIsXtermReady(true);
+        if (!isCleanedUp) {
+          fitAddon.fit();
+        }
       }, 50);
 
       // Handle user input - send directly to server
@@ -163,7 +295,9 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
 
       // Set up ResizeObserver for container
       resizeObserver = new ResizeObserver(() => {
-        setTimeout(() => fitAddon.fit(), 10);
+        if (!isCleanedUp) {
+          setTimeout(() => fitAddon.fit(), 10);
+        }
       });
       
       if (terminalWrapperRef.current) {
@@ -171,147 +305,58 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
       }
 
       // Connect to WebSocket after xterm is ready
-      connectToServer();
+      if (!isCleanedUp) {
+        connectToServer();
+      }
     };
 
     initXterm();
 
     // Handle window resize
     const handleResize = () => {
-      setTimeout(fitTerminal, 50);
+      if (!isCleanedUp && fitAddonRef.current) {
+        setTimeout(() => fitAddonRef.current?.fit(), 50);
+      }
     };
 
     window.addEventListener('resize', handleResize);
 
+    // Cleanup function
     return () => {
+      isCleanedUp = true;
+      isInitializedRef.current = false;
+      isConnectingRef.current = false;
+      
       window.removeEventListener('resize', handleResize);
+      
       if (resizeObserver) {
         resizeObserver.disconnect();
       }
+      
       if (terminal) {
         terminal.dispose();
+        xtermRef.current = null;
+        fitAddonRef.current = null;
       }
+      
       if (socketRef.current) {
         if (sessionIdRef.current) {
           socketRef.current.emit('terminal:disconnect', { sessionId: sessionIdRef.current });
         }
         socketRef.current.disconnect();
+        socketRef.current = null;
       }
+      
+      sessionIdRef.current = null;
     };
-  }, [serverId]);
+  }, [serverId, connectToServer]);
 
   // Fit terminal when maximized state changes
   useEffect(() => {
-    if (isXtermReady) {
+    if (xtermRef.current && fitAddonRef.current) {
       setTimeout(fitTerminal, 100);
     }
-  }, [isMaximized, isXtermReady, fitTerminal]);
-
-  const connectToServer = useCallback(() => {
-    setIsConnecting(true);
-    
-    const token = localStorage.getItem('auth_token');
-    if (!token) {
-      if (xtermRef.current) {
-        xtermRef.current.writeln('\x1b[31mError: Authentication token not found\x1b[0m');
-        xtermRef.current.write('\x1b[?25h'); // Show cursor
-      }
-      setIsConnecting(false);
-      return;
-    }
-
-    const wsUrl = getWebSocketUrl();
-    console.log('Terminal connecting to WebSocket:', wsUrl);
-
-    const newSocket = io(wsUrl, {
-      auth: { token },
-      transports: ['websocket', 'polling'],
-      reconnectionAttempts: 5,
-      reconnectionDelay: 1000,
-      timeout: 20000,
-    });
-
-    newSocket.on('connect', () => {
-      console.log('WebSocket connected');
-      socketRef.current = newSocket;
-      setSocket(newSocket);
-      
-      // Get terminal dimensions
-      const cols = xtermRef.current?.cols || 120;
-      const rows = xtermRef.current?.rows || 30;
-      
-      // Request PTY terminal connection
-      newSocket.emit('terminal:connect', { 
-        serverId,
-        cols,
-        rows
-      });
-    });
-
-    newSocket.on('terminal:connected', (data: { sessionId: string; serverName: string; currentDir: string }) => {
-      console.log('Terminal connected:', data);
-      setSessionId(data.sessionId);
-      sessionIdRef.current = data.sessionId;
-      setCurrentDir(data.currentDir || '~');
-      setIsConnected(true);
-      setIsConnecting(false);
-      
-      if (xtermRef.current) {
-        xtermRef.current.writeln('');
-        xtermRef.current.writeln(`\x1b[1;32mConnected to ${data.serverName}\x1b[0m`);
-        xtermRef.current.writeln(`\x1b[90mworking directory: ${data.currentDir}\x1b[0m`);
-        xtermRef.current.writeln('');
-        xtermRef.current.write('\x1b[?25h'); // Show cursor
-      }
-      
-      // Fit after connected
-      setTimeout(fitTerminal, 100);
-    });
-
-    // Handle PTY data (real terminal output)
-    newSocket.on('terminal:data', (data: { sessionId: string; data: string }) => {
-      if (xtermRef.current && data.data) {
-        xtermRef.current.write(data.data);
-      }
-    });
-
-    newSocket.on('terminal:error', (data: { error: string }) => {
-      console.error('Terminal error:', data.error);
-      if (xtermRef.current) {
-        xtermRef.current.writeln(`\x1b[31mError: ${data.error}\x1b[0m`);
-        xtermRef.current.write('\x1b[?25h'); // Show cursor
-      }
-      setIsConnecting(false);
-    });
-
-    newSocket.on('terminal:closed', () => {
-      console.log('Terminal session closed');
-      setIsConnected(false);
-      if (xtermRef.current) {
-        xtermRef.current.writeln('');
-        xtermRef.current.writeln('\x1b[33mSession closed by server\x1b[0m');
-      }
-    });
-
-    newSocket.on('connect_error', (error: Error) => {
-      console.error('Connection error:', error);
-      if (xtermRef.current) {
-        xtermRef.current.writeln(`\x1b[31mConnection failed: ${error.message}\x1b[0m`);
-        xtermRef.current.write('\x1b[?25h'); // Show cursor
-      }
-      setIsConnecting(false);
-    });
-
-    newSocket.on('disconnect', (reason: string) => {
-      console.log('Disconnected:', reason);
-      setIsConnected(false);
-      if (xtermRef.current) {
-        xtermRef.current.writeln('');
-        xtermRef.current.writeln(`\x1b[33mDisconnected: ${reason}\x1b[0m`);
-      }
-    });
-
-  }, [serverId, fitTerminal]);
+  }, [isMaximized, fitTerminal]);
 
   const handleClose = useCallback(() => {
     if (socketRef.current && sessionIdRef.current) {
@@ -322,14 +367,27 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
   }, [onClose]);
 
   const reconnect = useCallback(() => {
+    // Reset flags
+    isConnectingRef.current = false;
+    
     if (socketRef.current) {
       socketRef.current.disconnect();
+      socketRef.current = null;
     }
+    
     if (xtermRef.current) {
       xtermRef.current.clear();
       xtermRef.current.writeln('\x1b[33mReconnecting...\x1b[0m');
     }
-    connectToServer();
+    
+    setIsConnected(false);
+    setSessionId(null);
+    sessionIdRef.current = null;
+    
+    // เรียก connect ใหม่
+    setTimeout(() => {
+      connectToServer();
+    }, 100);
   }, [connectToServer]);
 
   const clearTerminal = useCallback(() => {
