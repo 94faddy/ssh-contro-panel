@@ -21,10 +21,10 @@ const nextConfig = {
 
     return config;
   },
-  // ลบบรรทัดนี้ออก: output: 'standalone',
   
   env: {
-    WS_PORT: process.env.WS_PORT || '3001',
+    WS_PORT: process.env.WS_PORT || '3005',
+    NEXT_PUBLIC_WS_URL: process.env.NEXT_PUBLIC_WS_URL || '',
   },
 
   async headers() {

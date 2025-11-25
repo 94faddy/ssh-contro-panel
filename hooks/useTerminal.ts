@@ -63,6 +63,33 @@ const defaultConfig: TerminalConfig = {
   pasteWithMiddleClick: false
 };
 
+// Helper function to get WebSocket URL
+function getWebSocketUrl(): string {
+  // ใช้ NEXT_PUBLIC_WS_URL จาก environment variable
+  const wsUrl = process.env.NEXT_PUBLIC_WS_URL;
+  
+  if (wsUrl) {
+    return wsUrl;
+  }
+  
+  // Fallback สำหรับ development
+  if (typeof window !== 'undefined') {
+    const protocol = window.location.protocol;
+    const hostname = window.location.hostname;
+    const wsPort = process.env.WS_PORT || '3005';
+    
+    // ถ้าเป็น localhost ใช้ port โดยตรง
+    if (hostname === 'localhost' || hostname === '127.0.0.1') {
+      return `${protocol}//${hostname}:${wsPort}`;
+    }
+    
+    // ถ้าเป็น production แต่ไม่มี NEXT_PUBLIC_WS_URL ให้ลอง subdomain ws-
+    return `${protocol}//ws-${hostname}`;
+  }
+  
+  return 'http://localhost:3005';
+}
+
 export function useTerminal({ 
   serverId, 
   serverName, 
@@ -148,12 +175,21 @@ export function useTerminal({
       return;
     }
 
-    const newSocket = io(`${window.location.protocol}//${window.location.hostname}:3001`, {
+    // ใช้ WebSocket URL จาก helper function
+    const wsUrl = getWebSocketUrl();
+    console.log('Connecting to WebSocket:', wsUrl);
+
+    const newSocket = io(wsUrl, {
       auth: { token },
-      transports: ['websocket', 'polling']
+      transports: ['websocket', 'polling'],
+      // เพิ่ม options สำหรับ Cloudflare
+      reconnectionAttempts: 5,
+      reconnectionDelay: 1000,
+      timeout: 20000,
     });
 
     newSocket.on('connect', () => {
+      console.log('WebSocket connected');
       setSocket(newSocket);
       newSocket.emit('terminal:connect', { serverId });
     });
@@ -242,7 +278,8 @@ export function useTerminal({
     });
 
     newSocket.on('connect_error', (error) => {
-      addOutput('error', 'Failed to connect to terminal server');
+      console.error('WebSocket connection error:', error);
+      addOutput('error', `Failed to connect to terminal server: ${error.message}`);
       setState(prev => ({ ...prev, isConnecting: false }));
       onError?.('Connection failed');
     });

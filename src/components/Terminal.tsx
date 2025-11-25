@@ -14,6 +14,33 @@ interface TerminalOutput {
   currentDir?: string;
 }
 
+// Helper function to get WebSocket URL
+function getWebSocketUrl(): string {
+  // ใช้ NEXT_PUBLIC_WS_URL จาก environment variable
+  const wsUrl = process.env.NEXT_PUBLIC_WS_URL;
+  
+  if (wsUrl) {
+    return wsUrl;
+  }
+  
+  // Fallback สำหรับ development
+  if (typeof window !== 'undefined') {
+    const protocol = window.location.protocol;
+    const hostname = window.location.hostname;
+    const wsPort = process.env.WS_PORT || '3005';
+    
+    // ถ้าเป็น localhost ใช้ port โดยตรง
+    if (hostname === 'localhost' || hostname === '127.0.0.1') {
+      return `${protocol}//${hostname}:${wsPort}`;
+    }
+    
+    // ถ้าเป็น production แต่ไม่มี NEXT_PUBLIC_WS_URL ให้ลอง subdomain ws-
+    return `${protocol}//ws-${hostname}`;
+  }
+  
+  return 'http://localhost:3005';
+}
+
 export default function Terminal({ serverId, serverName, onClose }: TerminalProps) {
   const [socket, setSocket] = useState<Socket | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -67,10 +94,17 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
       return;
     }
 
-    // Connect to WebSocket server
-    const newSocket = io(`${window.location.protocol}//${window.location.hostname}:3001`, {
+    // ใช้ WebSocket URL จาก helper function
+    const wsUrl = getWebSocketUrl();
+    console.log('Terminal connecting to WebSocket:', wsUrl);
+
+    const newSocket = io(wsUrl, {
       auth: { token },
-      transports: ['websocket', 'polling']
+      transports: ['websocket', 'polling'],
+      // เพิ่ม options สำหรับ Cloudflare
+      reconnectionAttempts: 5,
+      reconnectionDelay: 1000,
+      timeout: 20000,
     });
 
     newSocket.on('connect', () => {
@@ -167,7 +201,7 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
 
     newSocket.on('connect_error', (error) => {
       console.error('WebSocket connection error:', error);
-      addOutput('error', 'Failed to connect to terminal server', 'error');
+      addOutput('error', `Failed to connect to terminal server: ${error.message}`, 'error');
       setIsConnecting(false);
     });
   };

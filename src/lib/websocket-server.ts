@@ -2,6 +2,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 console.log('JWT_SECRET loaded:', !!process.env.JWT_SECRET);
+console.log('WS_PORT:', process.env.WS_PORT || '3005');
 
 import { createServer } from 'http';
 import { Server as SocketIOServer } from 'socket.io';
@@ -18,19 +19,71 @@ import { prisma } from './database';
 import { preprocessCommand } from './command-middleware';
 import type { TerminalWSMessage, ScriptWSMessage } from '@/types';
 
-const PORT = process.env.WS_PORT || 3001;
+// ใช้ WS_PORT จาก environment variable (default: 3005)
+const PORT = parseInt(process.env.WS_PORT || '3005', 10);
 
 // Create HTTP server
 const httpServer = createServer();
 
-// Create Socket.IO server
+// CORS origins - รองรับทั้ง development และ production
+const getAllowedOrigins = (): string[] => {
+  const origins: string[] = [];
+  
+  // Development origins
+  origins.push('http://localhost:3000');
+  origins.push('http://127.0.0.1:3000');
+  
+  // Production origins from env
+  if (process.env.NEXTAUTH_URL) {
+    origins.push(process.env.NEXTAUTH_URL);
+  }
+  
+  if (process.env.DOMAIN) {
+    origins.push(process.env.DOMAIN);
+  }
+  
+  // เพิ่ม wildcard สำหรับ subdomain
+  // เช่น https://ssh.pix9.my, https://ws-ssh.pix9.my
+  return origins;
+};
+
+// Create Socket.IO server with better CORS support
 const io = new SocketIOServer(httpServer, {
   cors: {
-    origin: process.env.NEXTAUTH_URL || "http://localhost:3000",
+    origin: (origin, callback) => {
+      const allowedOrigins = getAllowedOrigins();
+      
+      // Allow requests with no origin (mobile apps, curl, etc.)
+      if (!origin) {
+        return callback(null, true);
+      }
+      
+      // Check if origin is in allowed list
+      if (allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+      
+      // Allow any subdomain of pix9.my
+      if (origin.includes('pix9.my')) {
+        return callback(null, true);
+      }
+      
+      // Allow localhost for development
+      if (origin.includes('localhost') || origin.includes('127.0.0.1')) {
+        return callback(null, true);
+      }
+      
+      console.log('CORS blocked origin:', origin);
+      callback(new Error('Not allowed by CORS'));
+    },
     methods: ["GET", "POST"],
     credentials: true
   },
-  transports: ['websocket', 'polling']
+  transports: ['websocket', 'polling'],
+  // เพิ่ม settings สำหรับ Cloudflare
+  pingTimeout: 60000,
+  pingInterval: 25000,
+  allowEIO3: true,
 });
 
 // Active terminal sessions
@@ -66,13 +119,14 @@ io.use(async (socket, next) => {
     socket.data.user = user;
     next();
   } catch (error) {
+    console.error('Authentication error:', error);
     next(new Error('Authentication failed'));
   }
 });
 
 // Connection handler
 io.on('connection', (socket) => {
-  console.log(`User ${socket.data.user.email} connected`);
+  console.log(`User ${socket.data.user.email} connected from ${socket.handshake.address}`);
 
   // Handle terminal connection
   socket.on('terminal:connect', async (data: { serverId: number }) => {
@@ -665,7 +719,8 @@ setInterval(() => {
 
 // Start server
 httpServer.listen(PORT, () => {
-  console.log(`WebSocket server running on port ${PORT}`);
+  console.log(`🚀 WebSocket server running on port ${PORT}`);
+  console.log(`📡 CORS allowed origins:`, getAllowedOrigins());
 });
 
 // Graceful shutdown

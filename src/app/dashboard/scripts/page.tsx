@@ -20,6 +20,33 @@ interface ScriptExecution {
   progress?: number;
 }
 
+// Helper function to get WebSocket URL
+function getWebSocketUrl(): string {
+  // ใช้ NEXT_PUBLIC_WS_URL จาก environment variable
+  const wsUrl = process.env.NEXT_PUBLIC_WS_URL;
+  
+  if (wsUrl) {
+    return wsUrl;
+  }
+  
+  // Fallback สำหรับ development
+  if (typeof window !== 'undefined') {
+    const protocol = window.location.protocol;
+    const hostname = window.location.hostname;
+    const wsPort = process.env.WS_PORT || '3005';
+    
+    // ถ้าเป็น localhost ใช้ port โดยตรง
+    if (hostname === 'localhost' || hostname === '127.0.0.1') {
+      return `${protocol}//${hostname}:${wsPort}`;
+    }
+    
+    // ถ้าเป็น production แต่ไม่มี NEXT_PUBLIC_WS_URL ให้ลอง subdomain ws-
+    return `${protocol}//ws-${hostname}`;
+  }
+  
+  return 'http://localhost:3005';
+}
+
 export default function ScriptsPage() {
   const [servers, setServers] = useState<Server[]>([]);
   const [selectedServers, setSelectedServers] = useState<number[]>([]);
@@ -69,9 +96,17 @@ export default function ScriptsPage() {
     const token = localStorage.getItem('auth_token');
     if (!token) return;
 
-    const newSocket = io(`${window.location.protocol}//${window.location.hostname}:3001`, {
+    // ใช้ WebSocket URL จาก helper function
+    const wsUrl = getWebSocketUrl();
+    console.log('Scripts page connecting to WebSocket:', wsUrl);
+
+    const newSocket = io(wsUrl, {
       auth: { token },
-      transports: ['websocket', 'polling']
+      transports: ['websocket', 'polling'],
+      // เพิ่ม options สำหรับ Cloudflare
+      reconnectionAttempts: 5,
+      reconnectionDelay: 1000,
+      timeout: 20000,
     });
 
     newSocket.on('connect', () => {
@@ -143,6 +178,15 @@ export default function ScriptsPage() {
       Swal.fire({
         title: 'Script Execution Error',
         text: data.error,
+        icon: 'error'
+      });
+    });
+
+    newSocket.on('connect_error', (error) => {
+      console.error('WebSocket connection error:', error);
+      Swal.fire({
+        title: 'Connection Error',
+        text: `Failed to connect to WebSocket server: ${error.message}`,
         icon: 'error'
       });
     });
