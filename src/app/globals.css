@@ -729,3 +729,115 @@
     display: none !important;
   }
 }
+
+/* Terminal container */
+.xterm {
+  height: 100%;
+  padding: 8px;
+}
+
+.xterm-viewport {
+  overflow-y: auto !important;
+}
+
+.xterm-screen {
+  width: 100%;
+}
+
+/* Custom scrollbar for terminal */
+.xterm-viewport::-webkit-scrollbar {
+  width: 8px;
+}
+
+.xterm-viewport::-webkit-scrollbar-track {
+  background: #1a202c;
+}
+
+.xterm-viewport::-webkit-scrollbar-thumb {
+  background: #4a5568;
+  border-radius: 4px;
+}
+
+.xterm-viewport::-webkit-scrollbar-thumb:hover {
+  background: #718096;
+}
+
+/* Selection highlight */
+.xterm .xterm-selection div {
+  background-color: rgba(59, 130, 246, 0.3) !important;
+}
+
+/* Cursor styles */
+.xterm-cursor-block {
+  background-color: #10b981 !important;
+}
+
+.xterm-cursor-bar {
+  background-color: #10b981 !important;
+}
+
+.xterm-cursor-underline {
+  border-bottom-color: #10b981 !important;
+}
+
+/* Blinking cursor */
+@keyframes terminal-cursor-blink {
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: 0; }
+}
+
+.xterm-cursor-blink {
+  animation: terminal-cursor-blink 1s step-end infinite;
+}
+
+/* Terminal links */
+.xterm-link {
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.xterm-link:hover {
+  color: #60a5fa !important;
+}
+
+/* Bell visual indicator (optional) */
+.xterm-bell-active {
+  animation: terminal-bell 0.3s ease-in-out;
+}
+
+@keyframes terminal-bell {
+  0%, 100% { background-color: #1a202c; }
+  50% { background-color: #2d3748; }
+}
+
+/* Responsive terminal */
+@media (max-width: 768px) {
+  .xterm {
+    font-size: 12px !important;
+  }
+}
+
+/* Terminal container in maximized mode */
+.terminal-maximized .xterm {
+  height: calc(100vh - 120px);
+}
+
+/* Loading state */
+.terminal-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: #a0aec0;
+}
+
+.terminal-loading-spinner {
+  animation: spin 1s linear infinite;
+  margin-right: 8px;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+

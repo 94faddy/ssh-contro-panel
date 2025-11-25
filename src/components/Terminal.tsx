@@ -1,19 +1,9 @@
 'use client';
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { X, Maximize2, Minimize2, RotateCcw, Copy, Loader2 } from 'lucide-react';
+import { X, Maximize2, Minimize2, RotateCcw, Download, Loader2 } from 'lucide-react';
 import { io, Socket } from 'socket.io-client';
 import type { TerminalProps } from '@/types';
-
-interface TerminalOutput {
-  id: string;
-  type: 'input' | 'output' | 'error' | 'system' | 'streaming';
-  content: string;
-  timestamp: Date;
-  command?: string;
-  currentDir?: string;
-  isStreaming?: boolean;
-}
 
 // Helper function to get WebSocket URL
 function getWebSocketUrl(): string {
@@ -43,50 +33,189 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
-  const [currentCommand, setCurrentCommand] = useState('');
-  const [commandHistory, setCommandHistory] = useState<string[]>([]);
-  const [historyIndex, setHistoryIndex] = useState(-1);
-  const [outputs, setOutputs] = useState<TerminalOutput[]>([]);
   const [isMaximized, setIsMaximized] = useState(false);
-  const [currentDir, setCurrentDir] = useState('/');
-  const [isCommandRunning, setIsCommandRunning] = useState(false);
-  const [tabCompletions, setTabCompletions] = useState<string[]>([]);
-  const [showCompletions, setShowCompletions] = useState(false);
-  const [completionIndex, setCompletionIndex] = useState(-1);
-  const [streamingOutputId, setStreamingOutputId] = useState<string | null>(null);
+  const [currentDir, setCurrentDir] = useState('~');
+  const [isXtermReady, setIsXtermReady] = useState(false);
   
-  const terminalRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-  const completionRef = useRef<HTMLDivElement>(null);
-  const streamingBufferRef = useRef<string>('');
+  const terminalContainerRef = useRef<HTMLDivElement>(null);
+  const terminalWrapperRef = useRef<HTMLDivElement>(null);
+  const xtermRef = useRef<any>(null);
+  const fitAddonRef = useRef<any>(null);
+  const socketRef = useRef<Socket | null>(null);
+  const sessionIdRef = useRef<string | null>(null);
 
+  // Fit terminal function with debounce
+  const fitTerminal = useCallback(() => {
+    if (fitAddonRef.current && xtermRef.current && terminalContainerRef.current) {
+      try {
+        // Make sure container has dimensions before fitting
+        const container = terminalContainerRef.current;
+        if (container.offsetWidth > 0 && container.offsetHeight > 0) {
+          fitAddonRef.current.fit();
+        }
+      } catch (e) {
+        console.error('Fit error:', e);
+      }
+    }
+  }, []);
+
+  // Initialize xterm.js
   useEffect(() => {
-    connectToServer();
+    let terminal: any = null;
+    let fitAddon: any = null;
+    let resizeObserver: ResizeObserver | null = null;
+
+    const initXterm = async () => {
+      // Dynamic import xterm.js
+      const { Terminal } = await import('xterm');
+      const { FitAddon } = await import('xterm-addon-fit');
+      const { WebLinksAddon } = await import('xterm-addon-web-links');
+
+      // Import CSS
+      await import('xterm/css/xterm.css');
+
+      if (!terminalContainerRef.current) return;
+
+      // Create terminal with optimized settings
+      terminal = new Terminal({
+        cursorBlink: true,
+        cursorStyle: 'block',
+        fontSize: 14,
+        fontFamily: 'JetBrains Mono, Fira Code, Monaco, Consolas, "Courier New", monospace',
+        lineHeight: 1.2,
+        letterSpacing: 0,
+        theme: {
+          background: '#0d1117',
+          foreground: '#c9d1d9',
+          cursor: '#58a6ff',
+          cursorAccent: '#0d1117',
+          selectionBackground: 'rgba(56, 139, 253, 0.4)',
+          selectionForeground: '#ffffff',
+          black: '#484f58',
+          red: '#ff7b72',
+          green: '#3fb950',
+          yellow: '#d29922',
+          blue: '#58a6ff',
+          magenta: '#bc8cff',
+          cyan: '#39c5cf',
+          white: '#b1bac4',
+          brightBlack: '#6e7681',
+          brightRed: '#ffa198',
+          brightGreen: '#56d364',
+          brightYellow: '#e3b341',
+          brightBlue: '#79c0ff',
+          brightMagenta: '#d2a8ff',
+          brightCyan: '#56d4dd',
+          brightWhite: '#f0f6fc'
+        },
+        allowProposedApi: true,
+        scrollback: 10000,
+        convertEol: true,
+        scrollOnUserInput: true,
+      });
+
+      fitAddon = new FitAddon();
+      const webLinksAddon = new WebLinksAddon();
+
+      terminal.loadAddon(fitAddon);
+      terminal.loadAddon(webLinksAddon);
+
+      // Open terminal
+      terminal.open(terminalContainerRef.current);
+
+      xtermRef.current = terminal;
+      fitAddonRef.current = fitAddon;
+
+      // Initial fit with delay to ensure container is ready
+      setTimeout(() => {
+        fitAddon.fit();
+        setIsXtermReady(true);
+      }, 50);
+
+      // Handle user input - send directly to server
+      terminal.onData((data: string) => {
+        if (socketRef.current && sessionIdRef.current) {
+          socketRef.current.emit('terminal:input', {
+            sessionId: sessionIdRef.current,
+            data: data
+          });
+        }
+      });
+
+      // Handle resize
+      terminal.onResize(({ cols, rows }: { cols: number; rows: number }) => {
+        if (socketRef.current && sessionIdRef.current) {
+          socketRef.current.emit('terminal:resize', {
+            sessionId: sessionIdRef.current,
+            cols,
+            rows
+          });
+        }
+      });
+
+      // Write welcome message
+      terminal.writeln('\x1b[1;36m╔══════════════════════════════════════════════════════════════╗\x1b[0m');
+      terminal.writeln('\x1b[1;36m║\x1b[0m             \x1b[1;32mSSH Control Panel - Terminal\x1b[0m                   \x1b[1;36m║\x1b[0m');
+      terminal.writeln('\x1b[1;36m╚══════════════════════════════════════════════════════════════╝\x1b[0m');
+      terminal.writeln('');
+      terminal.writeln('\x1b[33mConnecting to server...\x1b[0m');
+      terminal.write('\x1b[?25l'); // Hide cursor while connecting
+
+      // Set up ResizeObserver for container
+      resizeObserver = new ResizeObserver(() => {
+        setTimeout(() => fitAddon.fit(), 10);
+      });
+      
+      if (terminalWrapperRef.current) {
+        resizeObserver.observe(terminalWrapperRef.current);
+      }
+
+      // Connect to WebSocket after xterm is ready
+      connectToServer();
+    };
+
+    initXterm();
+
+    // Handle window resize
+    const handleResize = () => {
+      setTimeout(fitTerminal, 50);
+    };
+
+    window.addEventListener('resize', handleResize);
+
     return () => {
-      if (socket) {
-        socket.disconnect();
+      window.removeEventListener('resize', handleResize);
+      if (resizeObserver) {
+        resizeObserver.disconnect();
+      }
+      if (terminal) {
+        terminal.dispose();
+      }
+      if (socketRef.current) {
+        if (sessionIdRef.current) {
+          socketRef.current.emit('terminal:disconnect', { sessionId: sessionIdRef.current });
+        }
+        socketRef.current.disconnect();
       }
     };
   }, [serverId]);
 
+  // Fit terminal when maximized state changes
   useEffect(() => {
-    if (terminalRef.current) {
-      terminalRef.current.scrollTop = terminalRef.current.scrollHeight;
+    if (isXtermReady) {
+      setTimeout(fitTerminal, 100);
     }
-  }, [outputs]);
+  }, [isMaximized, isXtermReady, fitTerminal]);
 
-  useEffect(() => {
-    if (isConnected && inputRef.current && !isCommandRunning) {
-      inputRef.current.focus();
-    }
-  }, [isConnected, isCommandRunning]);
-
-  const connectToServer = () => {
+  const connectToServer = useCallback(() => {
     setIsConnecting(true);
     
     const token = localStorage.getItem('auth_token');
     if (!token) {
-      addOutput('system', 'Authentication token not found', 'error');
+      if (xtermRef.current) {
+        xtermRef.current.writeln('\x1b[31mError: Authentication token not found\x1b[0m');
+        xtermRef.current.write('\x1b[?25h'); // Show cursor
+      }
       setIsConnecting(false);
       return;
     }
@@ -104,453 +233,203 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
 
     newSocket.on('connect', () => {
       console.log('WebSocket connected');
+      socketRef.current = newSocket;
       setSocket(newSocket);
-      newSocket.emit('terminal:connect', { serverId });
+      
+      // Get terminal dimensions
+      const cols = xtermRef.current?.cols || 120;
+      const rows = xtermRef.current?.rows || 30;
+      
+      // Request PTY terminal connection
+      newSocket.emit('terminal:connect', { 
+        serverId,
+        cols,
+        rows
+      });
     });
 
-    newSocket.on('disconnect', () => {
-      console.log('WebSocket disconnected');
-      setIsConnected(false);
-      setSessionId(null);
-      setIsCommandRunning(false);
-      addOutput('system', 'Connection lost', 'error');
-    });
-
-    newSocket.on('terminal:connected', (data: { 
-      sessionId: string; 
-      serverName: string; 
-      serverId: number;
-      currentDir?: string;
-    }) => {
+    newSocket.on('terminal:connected', (data: { sessionId: string; serverName: string; currentDir: string }) => {
+      console.log('Terminal connected:', data);
       setSessionId(data.sessionId);
+      sessionIdRef.current = data.sessionId;
+      setCurrentDir(data.currentDir || '~');
       setIsConnected(true);
       setIsConnecting(false);
-      setCurrentDir(data.currentDir || '/');
-      addOutput('system', `Connected to ${data.serverName}`, 'system');
-      addOutput('system', 'Welcome to SSH Terminal! Type your commands below.', 'system');
-      addOutput('system', `Working directory: ${data.currentDir || '/'}`, 'system');
-    });
-
-    // Handle command started - show that command is executing
-    newSocket.on('terminal:command-started', (data: {
-      sessionId: string;
-      command: string;
-      timestamp: string;
-    }) => {
-      // Create a streaming output entry
-      const streamId = `stream-${Date.now()}`;
-      setStreamingOutputId(streamId);
-      streamingBufferRef.current = '';
       
-      // Add streaming output placeholder
-      setOutputs(prev => [...prev, {
-        id: streamId,
-        type: 'streaming',
-        content: '',
-        timestamp: new Date(),
-        isStreaming: true
-      }]);
-    });
-
-    // Handle streaming output - real-time data
-    newSocket.on('terminal:stream', (data: {
-      sessionId: string;
-      type: 'stdout' | 'stderr';
-      data: string;
-      timestamp: string;
-    }) => {
-      // Append to streaming buffer
-      streamingBufferRef.current += data.data;
-      
-      // Update the streaming output entry
-      setOutputs(prev => prev.map(output => {
-        if (output.isStreaming) {
-          return {
-            ...output,
-            content: streamingBufferRef.current,
-            type: data.type === 'stderr' ? 'error' : 'streaming'
-          };
-        }
-        return output;
-      }));
-    });
-
-    // Handle command completion
-    newSocket.on('terminal:output', (data: {
-      sessionId: string;
-      command: string;
-      stdout: string;
-      stderr: string;
-      exitCode: number;
-      currentDir: string;
-      timestamp: string;
-      isComplete?: boolean;
-    }) => {
-      setIsCommandRunning(false);
-      
-      if (data.currentDir) {
-        setCurrentDir(data.currentDir);
+      if (xtermRef.current) {
+        xtermRef.current.writeln('');
+        xtermRef.current.writeln(`\x1b[1;32mConnected to ${data.serverName}\x1b[0m`);
+        xtermRef.current.writeln(`\x1b[90mworking directory: ${data.currentDir}\x1b[0m`);
+        xtermRef.current.writeln('');
+        xtermRef.current.write('\x1b[?25h'); // Show cursor
       }
+      
+      // Fit after connected
+      setTimeout(fitTerminal, 100);
+    });
 
-      // Finalize streaming output
-      if (data.isComplete) {
-        setOutputs(prev => prev.map(output => {
-          if (output.isStreaming) {
-            return {
-              ...output,
-              isStreaming: false
-            };
-          }
-          return output;
-        }));
-        
-        setStreamingOutputId(null);
-        streamingBufferRef.current = '';
-        
-        // Show exit code if non-zero
-        if (data.exitCode !== 0) {
-          addOutput('system', `Command exited with code: ${data.exitCode}`, 'error');
-        }
-      }
-
-      // Handle clear command
-      if (data.command.trim() === 'clear' || (streamingBufferRef.current && streamingBufferRef.current.includes('\x1b[2J\x1b[H'))) {
-        setOutputs([]);
-        addOutput('system', `Terminal cleared`, 'system');
-        return;
+    // Handle PTY data (real terminal output)
+    newSocket.on('terminal:data', (data: { sessionId: string; data: string }) => {
+      if (xtermRef.current && data.data) {
+        xtermRef.current.write(data.data);
       }
     });
 
-    newSocket.on('terminal:tab-complete-result', (data: {
-      sessionId: string;
-      partial: string;
-      completions: string[];
-    }) => {
-      if (data.completions.length > 0) {
-        setTabCompletions(data.completions);
-        setShowCompletions(true);
-        setCompletionIndex(-1);
-      } else {
-        setShowCompletions(false);
+    newSocket.on('terminal:error', (data: { error: string }) => {
+      console.error('Terminal error:', data.error);
+      if (xtermRef.current) {
+        xtermRef.current.writeln(`\x1b[31mError: ${data.error}\x1b[0m`);
+        xtermRef.current.write('\x1b[?25h'); // Show cursor
       }
-    });
-
-    newSocket.on('terminal:error', (data: { error: string; details?: string }) => {
-      addOutput('error', `Error: ${data.error}${data.details ? ` - ${data.details}` : ''}`, 'error');
-      setIsConnecting(false);
-      setIsCommandRunning(false);
-      
-      // Clear streaming state
-      setStreamingOutputId(null);
-      streamingBufferRef.current = '';
-      setOutputs(prev => prev.map(output => ({
-        ...output,
-        isStreaming: false
-      })));
-    });
-
-    newSocket.on('connect_error', (error) => {
-      console.error('WebSocket connection error:', error);
-      addOutput('error', `Failed to connect to terminal server: ${error.message}`, 'error');
       setIsConnecting(false);
     });
-  };
 
-  const addOutput = (type: TerminalOutput['type'], content: string, displayType: string = type, newLine: boolean = true) => {
-    const output: TerminalOutput = {
-      id: Date.now().toString() + Math.random(),
-      type,
-      content: newLine ? content : content,
-      timestamp: new Date(),
-      currentDir
-    };
-    
-    setOutputs(prev => [...prev, output]);
-  };
-
-  const getPrompt = () => {
-    const shortDir = currentDir.length > 20 ? '...' + currentDir.slice(-17) : currentDir;
-    return `${serverName}:${shortDir}$ `;
-  };
-
-  const executeCommand = () => {
-    if (!currentCommand.trim() || !socket || !sessionId || isCommandRunning) return;
-
-    setIsCommandRunning(true);
-    setShowCompletions(false);
-
-    // Add command to history
-    if (currentCommand.trim() !== commandHistory[commandHistory.length - 1]) {
-      setCommandHistory(prev => [...prev, currentCommand.trim()]);
-    }
-    setHistoryIndex(-1);
-
-    // Display command in terminal
-    const prompt = getPrompt();
-    addOutput('input', `${prompt}${currentCommand}`, 'input');
-
-    // Clear completions
-    setTabCompletions([]);
-
-    // Send command to server
-    socket.emit('terminal:command', {
-      sessionId,
-      command: currentCommand.trim()
+    newSocket.on('terminal:closed', () => {
+      console.log('Terminal session closed');
+      setIsConnected(false);
+      if (xtermRef.current) {
+        xtermRef.current.writeln('');
+        xtermRef.current.writeln('\x1b[33mSession closed by server\x1b[0m');
+      }
     });
 
-    setCurrentCommand('');
-  };
-
-  const handleTabCompletion = () => {
-    if (!socket || !sessionId || isCommandRunning) return;
-
-    const words = currentCommand.split(' ');
-    const lastWord = words[words.length - 1] || '';
-    
-    if (lastWord.length > 0) {
-      socket.emit('terminal:tab-complete', {
-        sessionId,
-        partial: lastWord,
-        currentDir
-      });
-    }
-  };
-
-  const applyCompletion = (completion: string) => {
-    const words = currentCommand.split(' ');
-    const lastWord = words[words.length - 1] || '';
-    
-    if (lastWord.length > 0) {
-      words[words.length - 1] = completion;
-    } else {
-      words.push(completion);
-    }
-    
-    setCurrentCommand(words.join(' '));
-    setShowCompletions(false);
-    
-    if (inputRef.current) {
-      inputRef.current.focus();
-    }
-  };
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (isCommandRunning && e.key !== 'c' && !e.ctrlKey) {
-      return;
-    }
-
-    // Handle tab completions navigation
-    if (showCompletions && tabCompletions.length > 0) {
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        setCompletionIndex(prev => (prev + 1) % tabCompletions.length);
-        return;
-      } else if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        setCompletionIndex(prev => prev <= 0 ? tabCompletions.length - 1 : prev - 1);
-        return;
-      } else if (e.key === 'Enter' && completionIndex >= 0) {
-        e.preventDefault();
-        applyCompletion(tabCompletions[completionIndex]);
-        return;
-      } else if (e.key === 'Escape') {
-        e.preventDefault();
-        setShowCompletions(false);
-        return;
+    newSocket.on('connect_error', (error: Error) => {
+      console.error('Connection error:', error);
+      if (xtermRef.current) {
+        xtermRef.current.writeln(`\x1b[31mConnection failed: ${error.message}\x1b[0m`);
+        xtermRef.current.write('\x1b[?25h'); // Show cursor
       }
-    }
-
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      executeCommand();
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      if (commandHistory.length > 0) {
-        const newIndex = historyIndex < 0 ? commandHistory.length - 1 : Math.max(0, historyIndex - 1);
-        setHistoryIndex(newIndex);
-        setCurrentCommand(commandHistory[newIndex]);
-      }
-    } else if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      if (historyIndex >= 0) {
-        const newIndex = historyIndex + 1;
-        if (newIndex >= commandHistory.length) {
-          setHistoryIndex(-1);
-          setCurrentCommand('');
-        } else {
-          setHistoryIndex(newIndex);
-          setCurrentCommand(commandHistory[newIndex]);
-        }
-      }
-    } else if (e.key === 'Tab') {
-      e.preventDefault();
-      handleTabCompletion();
-    } else if (e.key === 'c' && e.ctrlKey) {
-      e.preventDefault();
-      if (isCommandRunning) {
-        if (socket && sessionId) {
-          socket.emit('terminal:command', {
-            sessionId,
-            command: '\x03'
-          });
-        }
-      }
-    } else {
-      if (showCompletions && e.key !== 'Tab') {
-        setShowCompletions(false);
-      }
-    }
-  };
-
-  const clearTerminal = () => {
-    setOutputs([]);
-    addOutput('system', `Connected to ${serverName}`, 'system');
-    addOutput('system', 'Terminal cleared', 'system');
-    addOutput('system', `Working directory: ${currentDir}`, 'system');
-  };
-
-  const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text).then(() => {
-      addOutput('system', 'Copied to clipboard', 'system');
-    }).catch(() => {
-      addOutput('system', 'Failed to copy to clipboard', 'error');
+      setIsConnecting(false);
     });
-  };
 
-  const reconnect = () => {
-    if (socket) {
-      socket.disconnect();
+    newSocket.on('disconnect', (reason: string) => {
+      console.log('Disconnected:', reason);
+      setIsConnected(false);
+      if (xtermRef.current) {
+        xtermRef.current.writeln('');
+        xtermRef.current.writeln(`\x1b[33mDisconnected: ${reason}\x1b[0m`);
+      }
+    });
+
+  }, [serverId, fitTerminal]);
+
+  const handleClose = useCallback(() => {
+    if (socketRef.current && sessionIdRef.current) {
+      socketRef.current.emit('terminal:disconnect', { sessionId: sessionIdRef.current });
+      socketRef.current.disconnect();
     }
-    setOutputs([]);
-    setIsCommandRunning(false);
-    setStreamingOutputId(null);
-    streamingBufferRef.current = '';
+    onClose?.();
+  }, [onClose]);
+
+  const reconnect = useCallback(() => {
+    if (socketRef.current) {
+      socketRef.current.disconnect();
+    }
+    if (xtermRef.current) {
+      xtermRef.current.clear();
+      xtermRef.current.writeln('\x1b[33mReconnecting...\x1b[0m');
+    }
     connectToServer();
-  };
+  }, [connectToServer]);
 
-  const formatOutput = (output: TerminalOutput) => {
-    const timestamp = output.timestamp.toLocaleTimeString();
-    
-    switch (output.type) {
-      case 'input':
-        return (
-          <div key={output.id} className="text-green-400 font-mono flex items-center group">
-            <span className="select-none">{output.content}</span>
-            <button
-              onClick={() => copyToClipboard(output.content)}
-              className="ml-2 opacity-0 group-hover:opacity-50 hover:opacity-100 transition-opacity"
-              title="Copy command"
-            >
-              <Copy className="h-3 w-3" />
-            </button>
-          </div>
-        );
-      case 'streaming':
-      case 'output':
-        return (
-          <div key={output.id} className="text-gray-100 font-mono whitespace-pre-wrap break-words group relative">
-            {output.content}
-            {output.isStreaming && (
-              <span className="inline-flex items-center ml-1">
-                <Loader2 className="h-3 w-3 animate-spin text-blue-400" />
-              </span>
-            )}
-            {!output.isStreaming && output.content && (
-              <button
-                onClick={() => copyToClipboard(output.content)}
-                className="absolute top-0 right-0 opacity-0 group-hover:opacity-50 hover:opacity-100 transition-opacity"
-                title="Copy output"
-              >
-                <Copy className="h-3 w-3" />
-              </button>
-            )}
-          </div>
-        );
-      case 'error':
-        return (
-          <div key={output.id} className="text-red-400 font-mono whitespace-pre-wrap break-words group relative">
-            {output.content}
-            {output.isStreaming && (
-              <span className="inline-flex items-center ml-1">
-                <Loader2 className="h-3 w-3 animate-spin text-red-400" />
-              </span>
-            )}
-            {!output.isStreaming && output.content && (
-              <button
-                onClick={() => copyToClipboard(output.content)}
-                className="absolute top-0 right-0 opacity-0 group-hover:opacity-50 hover:opacity-100 transition-opacity"
-                title="Copy error"
-              >
-                <Copy className="h-3 w-3" />
-              </button>
-            )}
-          </div>
-        );
-      case 'system':
-        return (
-          <div key={output.id} className="text-blue-400 font-mono italic">
-            [{timestamp}] {output.content}
-          </div>
-        );
-      default:
-        return (
-          <div key={output.id} className="text-gray-300 font-mono">
-            {output.content}
-          </div>
-        );
+  const clearTerminal = useCallback(() => {
+    if (xtermRef.current) {
+      xtermRef.current.clear();
     }
-  };
+  }, []);
+
+  const downloadLog = useCallback(() => {
+    if (!xtermRef.current) return;
+    
+    // Get terminal buffer content
+    const buffer = xtermRef.current.buffer.active;
+    let content = '';
+    
+    for (let i = 0; i < buffer.length; i++) {
+      const line = buffer.getLine(i);
+      if (line) {
+        content += line.translateToString(true) + '\n';
+      }
+    }
+    
+    // Create and download file
+    const blob = new Blob([content], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `terminal-${serverName}-${new Date().toISOString().slice(0, 10)}.log`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, [serverName]);
 
   return (
-    <div className={`bg-white shadow-xl rounded-lg overflow-hidden ${isMaximized ? 'fixed inset-4 z-50' : 'relative'} transition-all duration-200`}>
-      {/* Header */}
-      <div className="bg-gray-800 px-4 py-3 flex items-center justify-between">
+    <div 
+      className={`flex flex-col bg-gray-900 rounded-lg overflow-hidden shadow-2xl border border-gray-700 ${
+        isMaximized 
+          ? 'fixed inset-4 z-50' 
+          : 'w-full h-full'
+      }`}
+    >
+      {/* Title Bar */}
+      <div className="bg-gray-800 px-4 py-2 flex items-center justify-between flex-shrink-0 border-b border-gray-700">
         <div className="flex items-center space-x-3">
-          <div className="flex space-x-2">
-            <div className="w-3 h-3 bg-red-500 rounded-full"></div>
-            <div className="w-3 h-3 bg-yellow-500 rounded-full"></div>
+          {/* macOS style buttons */}
+          <div className="flex items-center space-x-2">
+            <button
+              onClick={handleClose}
+              className="w-3 h-3 bg-red-500 rounded-full hover:bg-red-600 transition-colors"
+              title="Close"
+            />
+            <button
+              onClick={() => setIsMaximized(!isMaximized)}
+              className="w-3 h-3 bg-yellow-500 rounded-full hover:bg-yellow-600 transition-colors"
+              title={isMaximized ? "Restore" : "Maximize"}
+            />
             <div className="w-3 h-3 bg-green-500 rounded-full"></div>
           </div>
-          <div className="text-white font-medium">
+          <div className="text-white font-medium flex items-center text-sm">
             Terminal - {serverName}
             {isConnected && (
-              <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
+              <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-900/50 text-green-400 border border-green-700">
                 Connected
               </span>
             )}
             {isConnecting && (
-              <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-800">
+              <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-yellow-900/50 text-yellow-400 border border-yellow-700">
                 <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                Connecting...
-              </span>
-            )}
-            {isCommandRunning && (
-              <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">
-                <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                Running...
+                Connecting
               </span>
             )}
           </div>
         </div>
         
-        <div className="flex items-center space-x-2">
+        <div className="flex items-center space-x-1">
+          <button
+            onClick={downloadLog}
+            className="p-1.5 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors"
+            title="Download log"
+          >
+            <Download className="h-4 w-4" />
+          </button>
           <button
             onClick={clearTerminal}
-            className="p-1 text-gray-400 hover:text-white rounded"
+            className="p-1.5 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors"
             title="Clear terminal"
           >
             <RotateCcw className="h-4 w-4" />
           </button>
           <button
             onClick={() => setIsMaximized(!isMaximized)}
-            className="p-1 text-gray-400 hover:text-white rounded"
+            className="p-1.5 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors"
             title={isMaximized ? "Restore" : "Maximize"}
           >
             {isMaximized ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
           </button>
           <button
-            onClick={onClose}
-            className="p-1 text-gray-400 hover:text-white rounded"
+            onClick={handleClose}
+            className="p-1.5 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors"
             title="Close terminal"
           >
             <X className="h-4 w-4" />
@@ -558,94 +437,62 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
         </div>
       </div>
 
-      {/* Terminal Content */}
-      <div className="bg-gray-900 h-96 flex flex-col relative">
-        {/* Output Area */}
-        <div
-          ref={terminalRef}
-          className="flex-1 overflow-y-auto p-4 space-y-1 custom-scrollbar"
-        >
-          {isConnecting && (
-            <div className="text-yellow-400 font-mono flex items-center">
-              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-              Connecting to {serverName}...
-            </div>
-          )}
-          
-          {outputs.map(output => formatOutput(output))}
-          
-          {!isConnected && !isConnecting && (
-            <div className="text-center py-8">
-              <div className="text-red-400 mb-4">Connection failed</div>
-              <button
-                onClick={reconnect}
-                className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
-              >
-                Reconnect
-              </button>
-            </div>
-          )}
-        </div>
-
-        {/* Tab Completions */}
-        {showCompletions && tabCompletions.length > 0 && (
-          <div 
-            ref={completionRef}
-            className="absolute bottom-16 left-4 right-4 bg-gray-800 border border-gray-600 rounded-md shadow-lg max-h-32 overflow-y-auto z-10"
-          >
-            {tabCompletions.map((completion, index) => (
-              <div
-                key={completion}
-                className={`px-3 py-1 font-mono text-sm cursor-pointer ${
-                  index === completionIndex 
-                    ? 'bg-blue-600 text-white' 
-                    : 'text-gray-300 hover:bg-gray-700'
-                }`}
-                onClick={() => applyCompletion(completion)}
-              >
-                {completion}
-              </div>
-            ))}
-          </div>
-        )}
-
-        {/* Input Area */}
-        {isConnected && (
-          <div className="border-t border-gray-700 p-4">
-            <div className="flex items-center space-x-2">
-              <span className="text-green-400 font-mono font-bold select-none">
-                {getPrompt()}
-              </span>
-              <input
-                ref={inputRef}
-                type="text"
-                value={currentCommand}
-                onChange={(e) => setCurrentCommand(e.target.value)}
-                onKeyDown={handleKeyDown}
-                className="flex-1 bg-transparent text-green-400 font-mono outline-none"
-                placeholder={isCommandRunning ? "Command is running... (Ctrl+C to interrupt)" : "Type your command here..."}
-                disabled={isCommandRunning}
-                autoComplete="off"
-                spellCheck="false"
-              />
-              {isCommandRunning && (
-                <Loader2 className="h-4 w-4 text-green-400 animate-spin" />
-              )}
-            </div>
-          </div>
-        )}
+      {/* Terminal Content - xterm.js container */}
+      <div 
+        ref={terminalWrapperRef}
+        className="flex-1 min-h-0 overflow-hidden"
+        style={{ backgroundColor: '#0d1117' }}
+      >
+        <div 
+          ref={terminalContainerRef}
+          className="w-full h-full"
+          style={{ 
+            padding: '8px',
+            boxSizing: 'border-box'
+          }}
+        />
       </div>
 
-      {/* Connection Status */}
-      {isConnected && (
-        <div className="bg-gray-800 px-4 py-2 text-xs text-gray-400 border-t border-gray-700">
-          Session: {sessionId} | Working Dir: {currentDir} | 
-          Use ↑↓ arrows for command history | Tab for completion | Ctrl+C to interrupt
-          {isCommandRunning && (
-            <span className="ml-2 text-blue-400">
-              | <Loader2 className="h-3 w-3 inline animate-spin" /> Streaming output...
-            </span>
-          )}
+      {/* Status Bar */}
+      <div className="bg-gray-800 px-4 py-1.5 text-xs text-gray-400 border-t border-gray-700 flex-shrink-0">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center space-x-4">
+            {isConnected ? (
+              <>
+                <span className="flex items-center">
+                  <span className="w-2 h-2 bg-green-500 rounded-full mr-2"></span>
+                  Session: {sessionId?.substring(0, 20)}...
+                </span>
+                <span className="text-gray-500">|</span>
+                <span>Dir: {currentDir}</span>
+              </>
+            ) : (
+              <span className="flex items-center">
+                <span className="w-2 h-2 bg-red-500 rounded-full mr-2"></span>
+                Disconnected
+              </span>
+            )}
+          </div>
+          <div className="text-gray-500 space-x-3">
+            <span>Ctrl+C: Interrupt</span>
+            <span>Ctrl+D: EOF</span>
+            <span>Ctrl+L: Clear</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Reconnect overlay */}
+      {!isConnected && !isConnecting && (
+        <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center">
+          <div className="text-center">
+            <p className="text-gray-300 mb-4">Connection lost</p>
+            <button
+              onClick={reconnect}
+              className="px-6 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium shadow-lg"
+            >
+              Reconnect
+            </button>
+          </div>
         </div>
       )}
     </div>

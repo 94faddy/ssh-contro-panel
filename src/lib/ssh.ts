@@ -28,8 +28,6 @@ export async function encryptPassword(password: string): Promise<string> {
 
 // Decrypt password (in real implementation, use proper encryption)
 export async function decryptPassword(encrypted: string, original?: string): Promise<string> {
-  // In production, implement proper decryption
-  // For now, we'll assume the password is stored encrypted with bcrypt
   return original || encrypted;
 }
 
@@ -113,7 +111,7 @@ export async function getSSHConnection(
       host: server.host,
       port: server.port,
       username: server.username,
-      password: server.password, // In production, decrypt this
+      password: server.password,
       readyTimeout: 15000,
       algorithms: {
         kex: ['diffie-hellman-group14-sha256', 'diffie-hellman-group14-sha1'],
@@ -174,7 +172,7 @@ export async function createShellSession(
       COLORTERM: 'truecolor',
       LANG: 'en_US.UTF-8',
       LC_ALL: 'en_US.UTF-8',
-      DEBIAN_FRONTEND: 'noninteractive' // Prevent interactive prompts
+      DEBIAN_FRONTEND: 'noninteractive'
     };
     
     // Parse environment variables and merge with defaults
