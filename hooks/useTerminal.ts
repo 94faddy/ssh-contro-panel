@@ -45,6 +45,9 @@ export interface UseTerminalReturn {
   copyToClipboard: (text: string) => void;
   validateCommand: (command: string) => CommandValidation;
   
+  // Streaming
+  isStreaming: boolean;
+  
   // Refs
   terminalRef: React.RefObject<HTMLDivElement>;
   inputRef: React.RefObject<HTMLInputElement>;
@@ -65,25 +68,21 @@ const defaultConfig: TerminalConfig = {
 
 // Helper function to get WebSocket URL
 function getWebSocketUrl(): string {
-  // ใช้ NEXT_PUBLIC_WS_URL จาก environment variable
   const wsUrl = process.env.NEXT_PUBLIC_WS_URL;
   
   if (wsUrl) {
     return wsUrl;
   }
   
-  // Fallback สำหรับ development
   if (typeof window !== 'undefined') {
     const protocol = window.location.protocol;
     const hostname = window.location.hostname;
     const wsPort = process.env.WS_PORT || '3005';
     
-    // ถ้าเป็น localhost ใช้ port โดยตรง
     if (hostname === 'localhost' || hostname === '127.0.0.1') {
       return `${protocol}//${hostname}:${wsPort}`;
     }
     
-    // ถ้าเป็น production แต่ไม่มี NEXT_PUBLIC_WS_URL ให้ลอง subdomain ws-
     return `${protocol}//ws-${hostname}`;
   }
   
@@ -115,10 +114,13 @@ export function useTerminal({
   const [tabCompletions, setTabCompletions] = useState<string[]>([]);
   const [showCompletions, setShowCompletions] = useState(false);
   const [completionIndex, setCompletionIndex] = useState(-1);
+  const [isStreaming, setIsStreaming] = useState(false);
   
   const terminalRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const configRef = useRef<TerminalConfig>({ ...defaultConfig, ...config });
+  const streamingBufferRef = useRef<string>('');
+  const streamingOutputIdRef = useRef<string | null>(null);
   
   // Update config when it changes
   useEffect(() => {
@@ -162,6 +164,19 @@ export function useTerminal({
     }));
   }, []);
 
+  const updateStreamingOutput = useCallback((content: string, type: TerminalOutputLine['type'] = 'output') => {
+    if (streamingOutputIdRef.current) {
+      setState(prev => ({
+        ...prev,
+        outputs: prev.outputs.map(output => 
+          output.id === streamingOutputIdRef.current
+            ? { ...output, content, type }
+            : output
+        )
+      }));
+    }
+  }, []);
+
   const connect = useCallback(() => {
     if (state.isConnecting || state.isConnected) return;
     
@@ -175,14 +190,12 @@ export function useTerminal({
       return;
     }
 
-    // ใช้ WebSocket URL จาก helper function
     const wsUrl = getWebSocketUrl();
     console.log('Connecting to WebSocket:', wsUrl);
 
     const newSocket = io(wsUrl, {
       auth: { token },
       transports: ['websocket', 'polling'],
-      // เพิ่ม options สำหรับ Cloudflare
       reconnectionAttempts: 5,
       reconnectionDelay: 1000,
       timeout: 20000,
@@ -201,6 +214,7 @@ export function useTerminal({
         sessionId: null,
         isCommandRunning: false
       }));
+      setIsStreaming(false);
       addOutput('system', 'Connection lost');
       onDisconnect?.();
     });
@@ -226,6 +240,49 @@ export function useTerminal({
       onConnect?.();
     });
 
+    // Handle command started - prepare for streaming
+    newSocket.on('terminal:command-started', (data: {
+      sessionId: string;
+      command: string;
+      timestamp: string;
+    }) => {
+      setIsStreaming(true);
+      streamingBufferRef.current = '';
+      
+      // Create streaming output placeholder
+      const streamId = `stream-${Date.now()}`;
+      streamingOutputIdRef.current = streamId;
+      
+      setState(prev => ({
+        ...prev,
+        outputs: [
+          ...prev.outputs,
+          {
+            id: streamId,
+            type: 'output',
+            content: '',
+            timestamp: new Date(),
+            copyable: true
+          }
+        ]
+      }));
+    });
+
+    // Handle streaming output - real-time data
+    newSocket.on('terminal:stream', (data: {
+      sessionId: string;
+      type: 'stdout' | 'stderr';
+      data: string;
+      timestamp: string;
+    }) => {
+      streamingBufferRef.current += data.data;
+      updateStreamingOutput(
+        streamingBufferRef.current,
+        data.type === 'stderr' ? 'error' : 'output'
+      );
+    });
+
+    // Handle command completion
     newSocket.on('terminal:output', (data: {
       sessionId: string;
       command: string;
@@ -234,22 +291,29 @@ export function useTerminal({
       exitCode: number;
       currentDir: string;
       timestamp: string;
+      isComplete?: boolean;
     }) => {
-      setState(prev => ({
-        ...prev,
-        isCommandRunning: false,
-        currentDirectory: data.currentDir || prev.currentDirectory
-      }));
+      if (data.isComplete) {
+        setState(prev => ({
+          ...prev,
+          isCommandRunning: false,
+          currentDirectory: data.currentDir || prev.currentDirectory
+        }));
+        
+        setIsStreaming(false);
+        streamingOutputIdRef.current = null;
+        streamingBufferRef.current = '';
 
-      if (data.stdout) {
-        addOutput('output', data.stdout);
-      }
-      if (data.stderr) {
-        addOutput('error', data.stderr);
-      }
-      
-      if (data.exitCode !== 0) {
-        addOutput('system', `Command exited with code: ${data.exitCode}`);
+        // Handle clear command
+        if (data.command.trim() === 'clear') {
+          setState(prev => ({ ...prev, outputs: [] }));
+          addOutput('system', 'Terminal cleared');
+          return;
+        }
+
+        if (data.exitCode !== 0) {
+          addOutput('system', `Command exited with code: ${data.exitCode}`);
+        }
       }
     });
 
@@ -274,6 +338,9 @@ export function useTerminal({
         isConnecting: false, 
         isCommandRunning: false 
       }));
+      setIsStreaming(false);
+      streamingOutputIdRef.current = null;
+      streamingBufferRef.current = '';
       onError?.(data.error);
     });
 
@@ -283,7 +350,7 @@ export function useTerminal({
       setState(prev => ({ ...prev, isConnecting: false }));
       onError?.('Connection failed');
     });
-  }, [serverId, state.isConnecting, state.isConnected, addOutput, onConnect, onDisconnect, onError]);
+  }, [serverId, state.isConnecting, state.isConnected, addOutput, updateStreamingOutput, onConnect, onDisconnect, onError]);
 
   const disconnect = useCallback(() => {
     if (socket) {
@@ -301,6 +368,7 @@ export function useTerminal({
       sessionId: null,
       isCommandRunning: false
     }));
+    setIsStreaming(false);
   }, [socket, state.sessionId]);
 
   const executeCommand = useCallback((command: string) => {
@@ -486,20 +554,18 @@ export function useTerminal({
   }, [addOutput]);
 
   const validateCommand = useCallback((command: string): CommandValidation => {
-    // Basic validation - can be extended with more sophisticated logic
     const trimmedCommand = command.trim();
     
     if (!trimmedCommand) {
       return { allowed: false, dangerous: false, requiresConfirmation: false };
     }
 
-    // Check for dangerous commands
     const dangerousPatterns = [
       /rm\s+-rf\s+\/\s*$/,
       /rm\s+-rf\s+\*\s*$/,
       /mkfs/,
       /dd\s+if=\/dev\/zero/,
-      /:\(\)\{\s*:\|\:&\s*\};\:/  // fork bomb
+      /:\(\)\{\s*:\|\:&\s*\};\:/
     ];
 
     const isDangerous = dangerousPatterns.some(pattern => pattern.test(trimmedCommand));
@@ -513,7 +579,6 @@ export function useTerminal({
       };
     }
 
-    // Check for sudo commands
     if (trimmedCommand.startsWith('sudo ')) {
       return {
         allowed: true,
@@ -556,6 +621,7 @@ export function useTerminal({
     applyCompletion,
     copyToClipboard,
     validateCommand,
+    isStreaming,
     terminalRef,
     inputRef
   };

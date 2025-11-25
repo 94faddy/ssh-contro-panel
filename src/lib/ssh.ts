@@ -205,7 +205,173 @@ export async function createShellSession(
   }
 }
 
-// Execute command in shell session
+// Stream callback type
+export type StreamCallback = (type: 'stdout' | 'stderr' | 'exit', data: string | number) => void;
+
+// Execute command with streaming output
+export async function executeShellCommandStreaming(
+  sessionId: string,
+  command: string,
+  onData: StreamCallback,
+  options: { timeout?: number } = {}
+): Promise<{
+  exitCode: number;
+  cwd?: string;
+}> {
+  const session = shellSessions.get(sessionId);
+  if (!session) {
+    throw new Error('Shell session not found');
+  }
+
+  try {
+    // Handle built-in commands
+    if (command.trim().startsWith('cd ')) {
+      const result = await handleCdCommand(sessionId, command);
+      if (result.stdout) onData('stdout', result.stdout);
+      if (result.stderr) onData('stderr', result.stderr);
+      onData('exit', result.exitCode);
+      return { exitCode: result.exitCode, cwd: result.cwd };
+    }
+
+    // Handle clear command specially
+    if (command.trim() === 'clear') {
+      onData('stdout', '\x1b[2J\x1b[H');
+      onData('exit', 0);
+      return { exitCode: 0, cwd: session.cwd };
+    }
+
+    // Ensure proper environment is set for all commands
+    const envVars = {
+      ...session.env,
+      TERM: 'xterm-256color',
+      COLORTERM: 'truecolor',
+      LANG: 'en_US.UTF-8',
+      LC_ALL: 'en_US.UTF-8',
+      DEBIAN_FRONTEND: 'noninteractive',
+      COLUMNS: '120',
+      LINES: '30'
+    };
+
+    // Build environment string
+    const envString = Object.entries(envVars)
+      .map(([key, value]) => `export ${key}="${value}"`)
+      .join('; ');
+
+    // Prepare command with proper environment and directory
+    const fullCommand = `cd "${session.cwd}" && ${envString} && ${command}`;
+
+    return new Promise((resolve, reject) => {
+      const timeoutMs = options.timeout || 300000; // 5 minutes default
+      let timeoutHandle: NodeJS.Timeout | null = null;
+      let exitCode = 0;
+      let isCompleted = false;
+
+      // Set timeout
+      if (timeoutMs > 0) {
+        timeoutHandle = setTimeout(() => {
+          if (!isCompleted) {
+            isCompleted = true;
+            onData('stderr', '\n[Command timed out]');
+            onData('exit', 124);
+            reject(new Error('Command timed out'));
+          }
+        }, timeoutMs);
+      }
+
+      // Get the underlying SSH2 connection
+      const connection = (session.ssh as any).connection;
+      
+      if (!connection) {
+        reject(new Error('SSH connection not available'));
+        return;
+      }
+
+      connection.exec(fullCommand, { pty: true }, (err: Error | undefined, stream: any) => {
+        if (err) {
+          if (timeoutHandle) clearTimeout(timeoutHandle);
+          reject(err);
+          return;
+        }
+
+        // Handle stdout streaming
+        stream.on('data', (data: Buffer) => {
+          if (!isCompleted) {
+            const text = data.toString('utf8');
+            // Filter out apt warnings
+            const filtered = text.replace(/WARNING: apt does not have a stable CLI interface\. Use with caution in scripts\.\n?/g, '');
+            if (filtered) {
+              onData('stdout', filtered);
+            }
+          }
+        });
+
+        // Handle stderr streaming
+        stream.stderr.on('data', (data: Buffer) => {
+          if (!isCompleted) {
+            const text = data.toString('utf8');
+            // Filter out apt warnings from stderr too
+            const filtered = text.replace(/WARNING: apt does not have a stable CLI interface\. Use with caution in scripts\.\n?/g, '');
+            if (filtered) {
+              onData('stderr', filtered);
+            }
+          }
+        });
+
+        // Handle close
+        stream.on('close', (code: number, signal: string) => {
+          if (!isCompleted) {
+            isCompleted = true;
+            if (timeoutHandle) clearTimeout(timeoutHandle);
+            exitCode = code || 0;
+            onData('exit', exitCode);
+
+            // Update current working directory if command might have changed it
+            if (command.includes('cd ') || command.includes('pushd ') || command.includes('popd ')) {
+              session.ssh.execCommand(`cd "${session.cwd}" && ${command} >/dev/null 2>&1; pwd`)
+                .then(pwdResult => {
+                  if (pwdResult.code === 0 && pwdResult.stdout.trim()) {
+                    session.cwd = pwdResult.stdout.trim();
+                  }
+                })
+                .catch(() => {});
+            }
+
+            resolve({ exitCode, cwd: session.cwd });
+          }
+        });
+
+        // Handle error
+        stream.on('error', (error: Error) => {
+          if (!isCompleted) {
+            isCompleted = true;
+            if (timeoutHandle) clearTimeout(timeoutHandle);
+            onData('stderr', `Error: ${error.message}`);
+            onData('exit', 1);
+            reject(error);
+          }
+        });
+      });
+    });
+  } catch (error) {
+    // Log error
+    await prisma.serverLog.create({
+      data: {
+        serverId: session.serverId,
+        logType: 'ERROR',
+        message: `Command failed: ${command}`,
+        data: {
+          command,
+          error: error instanceof Error ? error.message : 'Unknown error',
+          cwd: session.cwd
+        },
+      },
+    });
+
+    throw error;
+  }
+}
+
+// Execute command in shell session (non-streaming, backward compatible)
 export async function executeShellCommand(
   sessionId: string,
   command: string,
@@ -428,6 +594,145 @@ export async function closeSSHConnection(serverId: number, userId: number): Prom
   });
 }
 
+// Execute command with streaming for scripts (server-level)
+export async function executeCommandStreaming(
+  serverId: number,
+  userId: number,
+  command: string,
+  onData: StreamCallback,
+  options: { timeout?: number; cwd?: string } = {}
+): Promise<{ exitCode: number }> {
+  const ssh = await getSSHConnection(serverId, userId);
+  
+  if (!ssh) {
+    throw new Error('Failed to establish SSH connection');
+  }
+
+  // Set environment variables
+  const envVars = {
+    DEBIAN_FRONTEND: 'noninteractive',
+    TERM: 'xterm-256color',
+    LANG: 'en_US.UTF-8',
+    LC_ALL: 'en_US.UTF-8'
+  };
+
+  const envString = Object.entries(envVars)
+    .map(([key, value]) => `export ${key}="${value}"`)
+    .join('; ');
+
+  const fullCommand = options.cwd 
+    ? `cd "${options.cwd}" && ${envString} && ${command}`
+    : `${envString} && ${command}`;
+
+  return new Promise((resolve, reject) => {
+    const timeoutMs = options.timeout || 300000;
+    let timeoutHandle: NodeJS.Timeout | null = null;
+    let exitCode = 0;
+    let isCompleted = false;
+    let stdoutBuffer = '';
+    let stderrBuffer = '';
+
+    if (timeoutMs > 0) {
+      timeoutHandle = setTimeout(() => {
+        if (!isCompleted) {
+          isCompleted = true;
+          onData('stderr', '\n[Command timed out]');
+          onData('exit', 124);
+          
+          // Log timeout
+          prisma.serverLog.create({
+            data: {
+              serverId,
+              logType: 'ERROR',
+              message: `Command timed out: ${command}`,
+              data: { command, timeout: timeoutMs },
+            },
+          }).catch(console.error);
+          
+          reject(new Error('Command timed out'));
+        }
+      }, timeoutMs);
+    }
+
+    const connection = (ssh as any).connection;
+    
+    if (!connection) {
+      reject(new Error('SSH connection not available'));
+      return;
+    }
+
+    connection.exec(fullCommand, { pty: true }, (err: Error | undefined, stream: any) => {
+      if (err) {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+        reject(err);
+        return;
+      }
+
+      stream.on('data', (data: Buffer) => {
+        if (!isCompleted) {
+          const text = data.toString('utf8');
+          const filtered = text.replace(/WARNING: apt does not have a stable CLI interface\. Use with caution in scripts\.\n?/g, '');
+          if (filtered) {
+            stdoutBuffer += filtered;
+            onData('stdout', filtered);
+          }
+        }
+      });
+
+      stream.stderr.on('data', (data: Buffer) => {
+        if (!isCompleted) {
+          const text = data.toString('utf8');
+          const filtered = text.replace(/WARNING: apt does not have a stable CLI interface\. Use with caution in scripts\.\n?/g, '');
+          if (filtered) {
+            stderrBuffer += filtered;
+            onData('stderr', filtered);
+          }
+        }
+      });
+
+      stream.on('close', async (code: number) => {
+        if (!isCompleted) {
+          isCompleted = true;
+          if (timeoutHandle) clearTimeout(timeoutHandle);
+          exitCode = code || 0;
+          onData('exit', exitCode);
+
+          // Log command execution
+          try {
+            await prisma.serverLog.create({
+              data: {
+                serverId,
+                logType: 'COMMAND',
+                message: `Executed: ${command}`,
+                data: {
+                  command,
+                  exitCode,
+                  stdout: stdoutBuffer.substring(0, 10000), // Limit log size
+                  stderr: stderrBuffer.substring(0, 10000),
+                },
+              },
+            });
+          } catch (logError) {
+            console.error('Failed to log command:', logError);
+          }
+
+          resolve({ exitCode });
+        }
+      });
+
+      stream.on('error', (error: Error) => {
+        if (!isCompleted) {
+          isCompleted = true;
+          if (timeoutHandle) clearTimeout(timeoutHandle);
+          onData('stderr', `Error: ${error.message}`);
+          onData('exit', 1);
+          reject(error);
+        }
+      });
+    });
+  });
+}
+
 // Execute command on server (legacy function for backward compatibility)
 export async function executeCommand(
   serverId: number,
@@ -500,21 +805,21 @@ export async function executeCommand(
   }
 }
 
-// Get system information - ใช้คำสั่งง่าย ๆ เหมือนที่คุณเช็ค
+// Get system information
 export async function getSystemInfo(ssh: NodeSSH): Promise<SystemInfo> {
   try {
     const [
       osInfo,
       uptime,
       loadAvg,
-      memoryInfo,  // ใช้คำสั่งเดียวกับที่คุณเช็ค
+      memoryInfo,
       cpuInfo,
       diskInfo
     ] = await Promise.all([
       ssh.execCommand('uname -s -r -m'),
       ssh.execCommand('uptime -s && uptime'),
       ssh.execCommand('cat /proc/loadavg'),
-      ssh.execCommand('free | awk \'/Mem:/ {print $2, $7}\''), // total, available
+      ssh.execCommand('free | awk \'/Mem:/ {print $2, $7}\''),
       ssh.execCommand('nproc'),
       ssh.execCommand('df -h --type=ext4 --type=ext3 --type=ext2 --type=xfs')
     ]);
@@ -537,15 +842,15 @@ export async function getSystemInfo(ssh: NodeSSH): Promise<SystemInfo> {
       parseFloat(loadData[2]) || 0
     ];
 
-    // Parse memory info - ใช้วิธีง่าย ๆ ตรงกับที่คุณเช็ค
+    // Parse memory info
     let totalMemory = 0;
     let availableMemory = 0;
     
     if (memoryInfo.stdout) {
       const memData = memoryInfo.stdout.trim().split(' ');
       if (memData.length >= 2) {
-        totalMemory = parseInt(memData[0]) * 1024;      // total (KB -> bytes)
-        availableMemory = parseInt(memData[1]) * 1024;  // available (KB -> bytes)
+        totalMemory = parseInt(memData[0]) * 1024;
+        availableMemory = parseInt(memData[1]) * 1024;
       }
     }
 
@@ -555,7 +860,6 @@ export async function getSystemInfo(ssh: NodeSSH): Promise<SystemInfo> {
     // Parse disk usage
     const diskUsage = parseDiskUsage(diskInfo.stdout);
 
-    // ส่งข้อมูลที่ถูกต้อง - ใช้ available เป็น freeMemory
     return {
       os,
       arch,
@@ -563,7 +867,7 @@ export async function getSystemInfo(ssh: NodeSSH): Promise<SystemInfo> {
       uptime: uptimeSeconds,
       loadAverage,
       totalMemory,
-      freeMemory: availableMemory, // ใช้ available memory
+      freeMemory: availableMemory,
       cpuCount,
       diskUsage
     };
@@ -581,24 +885,16 @@ function parseUptimeFromString(uptimeStr: string): number {
   const uptimeText = match[1];
   let seconds = 0;
 
-  // Parse days
   const dayMatch = uptimeText.match(/(\d+)\s+day/);
   if (dayMatch) seconds += parseInt(dayMatch[1]) * 86400;
 
-  // Parse hours and minutes
   const timeMatch = uptimeText.match(/(\d+):(\d+)/);
   if (timeMatch) {
-    seconds += parseInt(timeMatch[1]) * 3600; // hours
-    seconds += parseInt(timeMatch[2]) * 60;   // minutes
+    seconds += parseInt(timeMatch[1]) * 3600;
+    seconds += parseInt(timeMatch[2]) * 60;
   }
 
   return seconds;
-}
-
-// Helper function to parse memory line
-function parseMemoryLine(line: string): number {
-  const match = line.match(/(\d+)\s+kB/);
-  return match ? parseInt(match[1]) : 0;
 }
 
 // Helper function to parse disk usage
@@ -648,7 +944,6 @@ export async function updateServerSystemInfo(serverId: number, userId: number): 
 
 // Cleanup inactive connections
 export function cleanupSSHConnections(): void {
-  // This should be called periodically to clean up inactive connections
   console.log(`Cleaning up SSH connections. Active: ${sshConnections.size}`);
   console.log(`Active shell sessions: ${shellSessions.size}`);
 }

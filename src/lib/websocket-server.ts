@@ -10,7 +10,9 @@ import {
   getSSHConnection, 
   executeCommand, 
   createShellSession, 
-  executeShellCommand, 
+  executeShellCommand,
+  executeShellCommandStreaming,
+  executeCommandStreaming,
   closeShellSession, 
   getShellSessionInfo 
 } from './ssh';
@@ -42,8 +44,6 @@ const getAllowedOrigins = (): string[] => {
     origins.push(process.env.DOMAIN);
   }
   
-  // เพิ่ม wildcard สำหรับ subdomain
-  // เช่น https://ssh.pix9.my, https://ws-ssh.pix9.my
   return origins;
 };
 
@@ -53,22 +53,18 @@ const io = new SocketIOServer(httpServer, {
     origin: (origin, callback) => {
       const allowedOrigins = getAllowedOrigins();
       
-      // Allow requests with no origin (mobile apps, curl, etc.)
       if (!origin) {
         return callback(null, true);
       }
       
-      // Check if origin is in allowed list
       if (allowedOrigins.includes(origin)) {
         return callback(null, true);
       }
       
-      // Allow any subdomain of pix9.my
       if (origin.includes('pix9.my')) {
         return callback(null, true);
       }
       
-      // Allow localhost for development
       if (origin.includes('localhost') || origin.includes('127.0.0.1')) {
         return callback(null, true);
       }
@@ -80,7 +76,6 @@ const io = new SocketIOServer(httpServer, {
     credentials: true
   },
   transports: ['websocket', 'polling'],
-  // เพิ่ม settings สำหรับ Cloudflare
   pingTimeout: 60000,
   pingInterval: 25000,
   allowEIO3: true,
@@ -99,8 +94,9 @@ const terminalSessions = new Map<string, {
 const scriptExecutions = new Map<string, {
   userId: number;
   serverIds: number[];
-  status: 'running' | 'completed' | 'failed';
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
   results: Map<number, any>;
+  abortControllers: Map<number, boolean>; // Track if server execution should be aborted
 }>();
 
 // Authentication middleware
@@ -134,7 +130,6 @@ io.on('connection', (socket) => {
       const { serverId } = data;
       const userId = socket.data.user.id;
 
-      // Check if user can access this server
       const server = await prisma.server.findUnique({
         where: { id: serverId }
       });
@@ -144,11 +139,9 @@ io.on('connection', (socket) => {
         return;
       }
 
-      // Create shell session
       const sessionId = `${userId}-${serverId}-${Date.now()}`;
       const shellSessionId = `shell-${sessionId}`;
 
-      // Create shell session with proper environment
       const shellCreated = await createShellSession(serverId, userId, shellSessionId);
       
       if (!shellCreated) {
@@ -156,7 +149,6 @@ io.on('connection', (socket) => {
         return;
       }
 
-      // Initialize terminal environment
       try {
         await executeShellCommand(shellSessionId, 'export TERM=xterm-256color; export COLORTERM=truecolor');
       } catch (error) {
@@ -171,11 +163,9 @@ io.on('connection', (socket) => {
         lastActivity: new Date()
       });
 
-      // Join terminal room
       socket.join(`terminal-${sessionId}`);
       socket.data.terminalSession = sessionId;
 
-      // Get initial session info
       const sessionInfo = getShellSessionInfo(shellSessionId);
       const currentDir = sessionInfo?.cwd || '/';
 
@@ -193,7 +183,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Handle terminal command
+  // Handle terminal command with STREAMING output
   socket.on('terminal:command', async (data: { sessionId: string; command: string }) => {
     try {
       const { sessionId, command } = data;
@@ -204,10 +194,8 @@ io.on('connection', (socket) => {
         return;
       }
 
-      // Update session activity
       session.lastActivity = new Date();
 
-      // Handle empty command
       if (!command.trim()) {
         const sessionInfo = getShellSessionInfo(session.shellSessionId);
         socket.emit('terminal:output', {
@@ -217,31 +205,81 @@ io.on('connection', (socket) => {
           stderr: '',
           exitCode: 0,
           currentDir: sessionInfo?.cwd || '/',
-          timestamp: new Date().toISOString()
+          timestamp: new Date().toISOString(),
+          isComplete: true
         });
         return;
       }
 
-      // Preprocess command (handle aliases, add safety flags)
       const processedCommand = preprocessCommand(command);
       
-      // Execute command in shell session
-      const result = await executeShellCommand(session.shellSessionId, processedCommand, {
-        timeout: 300000 // 5 minutes
-      });
-
-      // Send result back to client
-      socket.emit('terminal:output', {
+      // Notify client that command started
+      socket.emit('terminal:command-started', {
         sessionId,
         command: processedCommand,
-        stdout: result.stdout,
-        stderr: result.stderr,
-        exitCode: result.exitCode,
-        currentDir: result.cwd || '/',
         timestamp: new Date().toISOString()
       });
 
-      console.log(`Command executed in session ${sessionId}: ${processedCommand.substring(0, 50)}${processedCommand.length > 50 ? '...' : ''}`);
+      // Use streaming execution
+      try {
+        const result = await executeShellCommandStreaming(
+          session.shellSessionId, 
+          processedCommand,
+          (type, data) => {
+            // Stream data to client in real-time
+            if (type === 'stdout') {
+              socket.emit('terminal:stream', {
+                sessionId,
+                type: 'stdout',
+                data: data as string,
+                timestamp: new Date().toISOString()
+              });
+            } else if (type === 'stderr') {
+              socket.emit('terminal:stream', {
+                sessionId,
+                type: 'stderr',
+                data: data as string,
+                timestamp: new Date().toISOString()
+              });
+            } else if (type === 'exit') {
+              // Command completed - send final message
+              const sessionInfo = getShellSessionInfo(session.shellSessionId);
+              socket.emit('terminal:output', {
+                sessionId,
+                command: processedCommand,
+                stdout: '',
+                stderr: '',
+                exitCode: data as number,
+                currentDir: sessionInfo?.cwd || '/',
+                timestamp: new Date().toISOString(),
+                isComplete: true
+              });
+            }
+          },
+          { timeout: 300000 }
+        );
+
+        console.log(`Command executed in session ${sessionId}: ${processedCommand.substring(0, 50)}${processedCommand.length > 50 ? '...' : ''}`);
+      } catch (error) {
+        console.error('Terminal command error:', error);
+        socket.emit('terminal:error', { 
+          error: 'Failed to execute command',
+          details: error instanceof Error ? error.message : 'Unknown error'
+        });
+        
+        // Send completion anyway so UI doesn't hang
+        const sessionInfo = getShellSessionInfo(session.shellSessionId);
+        socket.emit('terminal:output', {
+          sessionId,
+          command: processedCommand,
+          stdout: '',
+          stderr: error instanceof Error ? error.message : 'Unknown error',
+          exitCode: 1,
+          currentDir: sessionInfo?.cwd || '/',
+          timestamp: new Date().toISOString(),
+          isComplete: true
+        });
+      }
     } catch (error) {
       console.error('Terminal command error:', error);
       socket.emit('terminal:error', { 
@@ -262,7 +300,6 @@ io.on('connection', (socket) => {
         return;
       }
 
-      // Use server's actual tab completion instead of predefined list
       const completionCommand = `cd "${currentDir}" && compgen -c "${partial}" 2>/dev/null | head -20`;
       
       try {
@@ -271,9 +308,8 @@ io.on('connection', (socket) => {
         const completions = result.stdout
           .split('\n')
           .filter(line => line.trim() && line.startsWith(partial))
-          .slice(0, 15); // Limit to 15 completions
+          .slice(0, 15);
 
-        // If no command completions, try file completions
         if (completions.length === 0) {
           const fileCompletionCommand = `cd "${currentDir}" && compgen -f "${partial}" 2>/dev/null | head -15`;
           const fileResult = await executeShellCommand(session.shellSessionId, fileCompletionCommand);
@@ -296,7 +332,6 @@ io.on('connection', (socket) => {
           });
         }
       } catch (error) {
-        // Fallback to basic file completion if compgen fails
         const basicCommand = `cd "${currentDir}" && ls -1 | grep "^${partial}" 2>/dev/null | head -10`;
         try {
           const basicResult = await executeShellCommand(session.shellSessionId, basicCommand);
@@ -340,7 +375,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Handle script execution
+  // Handle script execution with STREAMING output
   socket.on('script:run', async (data: { 
     scriptName: string; 
     command: string; 
@@ -369,7 +404,13 @@ io.on('connection', (socket) => {
         userId,
         serverIds,
         status: 'running',
-        results: new Map()
+        results: new Map(),
+        abortControllers: new Map()
+      });
+
+      // Initialize abort controllers for each server
+      servers.forEach(server => {
+        scriptExecutions.get(executionId)?.abortControllers.set(server.id, false);
       });
 
       // Join script room
@@ -397,49 +438,105 @@ io.on('connection', (socket) => {
         servers: servers.map(s => ({ id: s.id, name: s.name }))
       });
 
-      // Execute script on all servers
+      // Execute script on all servers with streaming
       const executions = servers.map(async (server, index) => {
+        const execution = scriptExecutions.get(executionId);
+        
         try {
+          // Emit initial status
           socket.emit('script:progress', {
             executionId,
             serverId: server.id,
             serverName: server.name,
             status: 'running',
-            message: 'Executing command...'
+            message: 'Starting execution...',
+            output: '',
+            error: ''
           });
 
-          const result = await executeCommand(server.id, userId, command, { timeout: 300000 }); // 5 minutes timeout
+          let stdoutBuffer = '';
+          let stderrBuffer = '';
+
+          // Use streaming execution
+          const result = await executeCommandStreaming(
+            server.id, 
+            userId, 
+            command,
+            (type, data) => {
+              // Check if cancelled
+              if (execution?.abortControllers.get(server.id)) {
+                return;
+              }
+
+              if (type === 'stdout') {
+                stdoutBuffer += data as string;
+                // Stream output to client in real-time
+                socket.emit('script:stream', {
+                  executionId,
+                  serverId: server.id,
+                  serverName: server.name,
+                  type: 'stdout',
+                  data: data as string,
+                  timestamp: new Date().toISOString()
+                });
+              } else if (type === 'stderr') {
+                stderrBuffer += data as string;
+                socket.emit('script:stream', {
+                  executionId,
+                  serverId: server.id,
+                  serverName: server.name,
+                  type: 'stderr',
+                  data: data as string,
+                  timestamp: new Date().toISOString()
+                });
+              } else if (type === 'exit') {
+                const exitCode = data as number;
+                const status = exitCode === 0 ? 'success' : 'failed';
+                
+                // Send final progress update
+                socket.emit('script:progress', {
+                  executionId,
+                  serverId: server.id,
+                  serverName: server.name,
+                  status,
+                  output: stdoutBuffer,
+                  error: stderrBuffer,
+                  exitCode,
+                  isComplete: true
+                });
+              }
+            },
+            { timeout: 300000 }
+          );
 
           // Update script log
           await prisma.scriptLog.update({
             where: { id: scriptLogs[index].id },
             data: {
-              status: result.code === 0 ? 'SUCCESS' : 'FAILED',
-              output: result.stdout,
-              error: result.stderr,
+              status: result.exitCode === 0 ? 'SUCCESS' : 'FAILED',
+              output: stdoutBuffer.substring(0, 50000), // Limit size
+              error: stderrBuffer.substring(0, 50000),
               endTime: new Date(),
               duration: Math.floor((Date.now() - scriptLogs[index].startTime.getTime()) / 1000)
             }
           });
 
-          socket.emit('script:progress', {
-            executionId,
-            serverId: server.id,
-            serverName: server.name,
-            status: result.code === 0 ? 'success' : 'failed',
-            output: result.stdout,
-            error: result.stderr,
-            exitCode: result.code
-          });
-
-          return { serverId: server.id, success: result.code === 0, result };
+          return { 
+            serverId: server.id, 
+            success: result.exitCode === 0, 
+            exitCode: result.exitCode,
+            stdout: stdoutBuffer,
+            stderr: stderrBuffer
+          };
         } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+          
           // Update script log with error
           await prisma.scriptLog.update({
             where: { id: scriptLogs[index].id },
             data: {
               status: 'FAILED',
-              error: error instanceof Error ? error.message : 'Unknown error',
+              error: errorMessage,
               endTime: new Date(),
               duration: Math.floor((Date.now() - scriptLogs[index].startTime.getTime()) / 1000)
             }
@@ -450,10 +547,16 @@ io.on('connection', (socket) => {
             serverId: server.id,
             serverName: server.name,
             status: 'failed',
-            error: error instanceof Error ? error.message : 'Unknown error'
+            error: errorMessage,
+            isComplete: true
           });
 
-          return { serverId: server.id, success: false, error };
+          return { 
+            serverId: server.id, 
+            success: false, 
+            exitCode: 1,
+            error: errorMessage 
+          };
         }
       });
 
@@ -480,8 +583,9 @@ io.on('connection', (socket) => {
         results: results.map(r => ({
           serverId: r.serverId,
           success: r.success,
-          output: r.result?.stdout || '',
-          error: r.result?.stderr || r.error || ''
+          exitCode: r.exitCode,
+          output: r.stdout || '',
+          error: r.stderr || r.error || ''
         }))
       });
 
@@ -503,7 +607,12 @@ io.on('connection', (socket) => {
       const execution = scriptExecutions.get(executionId);
 
       if (execution && execution.status === 'running') {
-        execution.status = 'completed';
+        // Mark all servers as cancelled
+        execution.abortControllers.forEach((_, serverId) => {
+          execution.abortControllers.set(serverId, true);
+        });
+        
+        execution.status = 'cancelled';
         
         // Update any running script logs to cancelled
         await prisma.scriptLog.updateMany({
@@ -511,7 +620,7 @@ io.on('connection', (socket) => {
             userId: execution.userId,
             status: 'RUNNING',
             startTime: {
-              gte: new Date(Date.now() - 600000) // Last 10 minutes
+              gte: new Date(Date.now() - 600000)
             }
           },
           data: {
@@ -543,12 +652,10 @@ io.on('connection', (socket) => {
         return;
       }
 
-      // Try to get SSH connection to check status
       const ssh = await getSSHConnection(serverId, userId);
       
       if (ssh) {
         try {
-          // Get current system info
           const systemInfo = await import('./ssh').then(m => m.getSystemInfo(ssh));
           
           socket.emit('server:status', {
@@ -598,7 +705,6 @@ io.on('connection', (socket) => {
 
       socket.emit('server:restarting', { serverId, serverName: server.name });
 
-      // Execute restart command
       const result = await executeCommand(serverId, userId, 'sudo reboot', { timeout: 10000 });
 
       socket.emit('server:restart-initiated', {
@@ -633,10 +739,8 @@ io.on('connection', (socket) => {
         return;
       }
 
-      // Join logs room
       socket.join(`logs-${serverId}`);
 
-      // Send recent logs
       const recentLogs = await prisma.serverLog.findMany({
         where: {
           serverId,
@@ -670,7 +774,6 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     console.log(`User ${socket.data.user.email} disconnected`);
 
-    // Clean up terminal sessions
     if (socket.data.terminalSession) {
       const session = terminalSessions.get(socket.data.terminalSession);
       if (session) {
@@ -680,7 +783,6 @@ io.on('connection', (socket) => {
       }
     }
 
-    // Leave all rooms
     socket.rooms.forEach(room => {
       socket.leave(room);
     });
@@ -706,7 +808,6 @@ setInterval(() => {
     }
   }
 
-  // Cleanup script executions older than 1 hour
   const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
   for (const [executionId, execution] of scriptExecutions.entries()) {
     const executionTime = new Date(parseInt(executionId.split('-')[1]));
@@ -727,7 +828,6 @@ httpServer.listen(PORT, () => {
 process.on('SIGTERM', () => {
   console.log('WebSocket server shutting down...');
   
-  // Close all socket connections
   io.close(() => {
     console.log('WebSocket server closed');
     process.exit(0);
@@ -737,7 +837,6 @@ process.on('SIGTERM', () => {
 process.on('SIGINT', () => {
   console.log('WebSocket server shutting down...');
   
-  // Close all socket connections
   io.close(() => {
     console.log('WebSocket server closed');
     process.exit(0);

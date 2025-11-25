@@ -1,40 +1,37 @@
 'use client';
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { X, Maximize2, Minimize2, RotateCcw, Copy } from 'lucide-react';
+import { X, Maximize2, Minimize2, RotateCcw, Copy, Loader2 } from 'lucide-react';
 import { io, Socket } from 'socket.io-client';
 import type { TerminalProps } from '@/types';
 
 interface TerminalOutput {
   id: string;
-  type: 'input' | 'output' | 'error' | 'system';
+  type: 'input' | 'output' | 'error' | 'system' | 'streaming';
   content: string;
   timestamp: Date;
   command?: string;
   currentDir?: string;
+  isStreaming?: boolean;
 }
 
 // Helper function to get WebSocket URL
 function getWebSocketUrl(): string {
-  // ใช้ NEXT_PUBLIC_WS_URL จาก environment variable
   const wsUrl = process.env.NEXT_PUBLIC_WS_URL;
   
   if (wsUrl) {
     return wsUrl;
   }
   
-  // Fallback สำหรับ development
   if (typeof window !== 'undefined') {
     const protocol = window.location.protocol;
     const hostname = window.location.hostname;
     const wsPort = process.env.WS_PORT || '3005';
     
-    // ถ้าเป็น localhost ใช้ port โดยตรง
     if (hostname === 'localhost' || hostname === '127.0.0.1') {
       return `${protocol}//${hostname}:${wsPort}`;
     }
     
-    // ถ้าเป็น production แต่ไม่มี NEXT_PUBLIC_WS_URL ให้ลอง subdomain ws-
     return `${protocol}//ws-${hostname}`;
   }
   
@@ -56,10 +53,12 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
   const [tabCompletions, setTabCompletions] = useState<string[]>([]);
   const [showCompletions, setShowCompletions] = useState(false);
   const [completionIndex, setCompletionIndex] = useState(-1);
+  const [streamingOutputId, setStreamingOutputId] = useState<string | null>(null);
   
   const terminalRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const completionRef = useRef<HTMLDivElement>(null);
+  const streamingBufferRef = useRef<string>('');
 
   useEffect(() => {
     connectToServer();
@@ -71,14 +70,12 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
   }, [serverId]);
 
   useEffect(() => {
-    // Auto scroll to bottom when new output is added
     if (terminalRef.current) {
       terminalRef.current.scrollTop = terminalRef.current.scrollHeight;
     }
   }, [outputs]);
 
   useEffect(() => {
-    // Focus input when component mounts or connects
     if (isConnected && inputRef.current && !isCommandRunning) {
       inputRef.current.focus();
     }
@@ -94,14 +91,12 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
       return;
     }
 
-    // ใช้ WebSocket URL จาก helper function
     const wsUrl = getWebSocketUrl();
     console.log('Terminal connecting to WebSocket:', wsUrl);
 
     const newSocket = io(wsUrl, {
       auth: { token },
       transports: ['websocket', 'polling'],
-      // เพิ่ม options สำหรับ Cloudflare
       reconnectionAttempts: 5,
       reconnectionDelay: 1000,
       timeout: 20000,
@@ -110,8 +105,6 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
     newSocket.on('connect', () => {
       console.log('WebSocket connected');
       setSocket(newSocket);
-      
-      // Request terminal connection
       newSocket.emit('terminal:connect', { serverId });
     });
 
@@ -138,6 +131,51 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
       addOutput('system', `Working directory: ${data.currentDir || '/'}`, 'system');
     });
 
+    // Handle command started - show that command is executing
+    newSocket.on('terminal:command-started', (data: {
+      sessionId: string;
+      command: string;
+      timestamp: string;
+    }) => {
+      // Create a streaming output entry
+      const streamId = `stream-${Date.now()}`;
+      setStreamingOutputId(streamId);
+      streamingBufferRef.current = '';
+      
+      // Add streaming output placeholder
+      setOutputs(prev => [...prev, {
+        id: streamId,
+        type: 'streaming',
+        content: '',
+        timestamp: new Date(),
+        isStreaming: true
+      }]);
+    });
+
+    // Handle streaming output - real-time data
+    newSocket.on('terminal:stream', (data: {
+      sessionId: string;
+      type: 'stdout' | 'stderr';
+      data: string;
+      timestamp: string;
+    }) => {
+      // Append to streaming buffer
+      streamingBufferRef.current += data.data;
+      
+      // Update the streaming output entry
+      setOutputs(prev => prev.map(output => {
+        if (output.isStreaming) {
+          return {
+            ...output,
+            content: streamingBufferRef.current,
+            type: data.type === 'stderr' ? 'error' : 'streaming'
+          };
+        }
+        return output;
+      }));
+    });
+
+    // Handle command completion
     newSocket.on('terminal:output', (data: {
       sessionId: string;
       command: string;
@@ -146,6 +184,7 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
       exitCode: number;
       currentDir: string;
       timestamp: string;
+      isComplete?: boolean;
     }) => {
       setIsCommandRunning(false);
       
@@ -153,30 +192,33 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
         setCurrentDir(data.currentDir);
       }
 
+      // Finalize streaming output
+      if (data.isComplete) {
+        setOutputs(prev => prev.map(output => {
+          if (output.isStreaming) {
+            return {
+              ...output,
+              isStreaming: false
+            };
+          }
+          return output;
+        }));
+        
+        setStreamingOutputId(null);
+        streamingBufferRef.current = '';
+        
+        // Show exit code if non-zero
+        if (data.exitCode !== 0) {
+          addOutput('system', `Command exited with code: ${data.exitCode}`, 'error');
+        }
+      }
+
       // Handle clear command
-      if (data.command.trim() === 'clear' || data.stdout.includes('\x1b[2J\x1b[H')) {
+      if (data.command.trim() === 'clear' || (streamingBufferRef.current && streamingBufferRef.current.includes('\x1b[2J\x1b[H'))) {
         setOutputs([]);
         addOutput('system', `Terminal cleared`, 'system');
         return;
       }
-
-      if (data.stdout) {
-        addOutput('output', data.stdout, 'output');
-      }
-      if (data.stderr) {
-        addOutput('error', data.stderr, 'error');
-      }
-      
-      // Show exit code if non-zero
-      if (data.exitCode !== 0) {
-        addOutput('system', `Command exited with code: ${data.exitCode}`, 'error');
-      }
-      
-      // Add command prompt for next command
-      setTimeout(() => {
-        const prompt = getPrompt();
-        addOutput('system', prompt, 'input', false);
-      }, 100);
     });
 
     newSocket.on('terminal:tab-complete-result', (data: {
@@ -197,6 +239,14 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
       addOutput('error', `Error: ${data.error}${data.details ? ` - ${data.details}` : ''}`, 'error');
       setIsConnecting(false);
       setIsCommandRunning(false);
+      
+      // Clear streaming state
+      setStreamingOutputId(null);
+      streamingBufferRef.current = '';
+      setOutputs(prev => prev.map(output => ({
+        ...output,
+        isStreaming: false
+      })));
     });
 
     newSocket.on('connect_error', (error) => {
@@ -279,7 +329,6 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
     setCurrentCommand(words.join(' '));
     setShowCompletions(false);
     
-    // Focus back to input
     if (inputRef.current) {
       inputRef.current.focus();
     }
@@ -339,16 +388,14 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
     } else if (e.key === 'c' && e.ctrlKey) {
       e.preventDefault();
       if (isCommandRunning) {
-        // Send interrupt signal
         if (socket && sessionId) {
           socket.emit('terminal:command', {
             sessionId,
-            command: '\x03' // Ctrl+C character
+            command: '\x03'
           });
         }
       }
     } else {
-      // Hide completions when typing
       if (showCompletions && e.key !== 'Tab') {
         setShowCompletions(false);
       }
@@ -376,6 +423,8 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
     }
     setOutputs([]);
     setIsCommandRunning(false);
+    setStreamingOutputId(null);
+    streamingBufferRef.current = '';
     connectToServer();
   };
 
@@ -396,30 +445,45 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
             </button>
           </div>
         );
+      case 'streaming':
       case 'output':
         return (
           <div key={output.id} className="text-gray-100 font-mono whitespace-pre-wrap break-words group relative">
             {output.content}
-            <button
-              onClick={() => copyToClipboard(output.content)}
-              className="absolute top-0 right-0 opacity-0 group-hover:opacity-50 hover:opacity-100 transition-opacity"
-              title="Copy output"
-            >
-              <Copy className="h-3 w-3" />
-            </button>
+            {output.isStreaming && (
+              <span className="inline-flex items-center ml-1">
+                <Loader2 className="h-3 w-3 animate-spin text-blue-400" />
+              </span>
+            )}
+            {!output.isStreaming && output.content && (
+              <button
+                onClick={() => copyToClipboard(output.content)}
+                className="absolute top-0 right-0 opacity-0 group-hover:opacity-50 hover:opacity-100 transition-opacity"
+                title="Copy output"
+              >
+                <Copy className="h-3 w-3" />
+              </button>
+            )}
           </div>
         );
       case 'error':
         return (
           <div key={output.id} className="text-red-400 font-mono whitespace-pre-wrap break-words group relative">
             {output.content}
-            <button
-              onClick={() => copyToClipboard(output.content)}
-              className="absolute top-0 right-0 opacity-0 group-hover:opacity-50 hover:opacity-100 transition-opacity"
-              title="Copy error"
-            >
-              <Copy className="h-3 w-3" />
-            </button>
+            {output.isStreaming && (
+              <span className="inline-flex items-center ml-1">
+                <Loader2 className="h-3 w-3 animate-spin text-red-400" />
+              </span>
+            )}
+            {!output.isStreaming && output.content && (
+              <button
+                onClick={() => copyToClipboard(output.content)}
+                className="absolute top-0 right-0 opacity-0 group-hover:opacity-50 hover:opacity-100 transition-opacity"
+                title="Copy error"
+              >
+                <Copy className="h-3 w-3" />
+              </button>
+            )}
           </div>
         );
       case 'system':
@@ -456,11 +520,13 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
             )}
             {isConnecting && (
               <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-800">
+                <Loader2 className="h-3 w-3 mr-1 animate-spin" />
                 Connecting...
               </span>
             )}
             {isCommandRunning && (
               <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">
+                <Loader2 className="h-3 w-3 mr-1 animate-spin" />
                 Running...
               </span>
             )}
@@ -500,7 +566,8 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
           className="flex-1 overflow-y-auto p-4 space-y-1 custom-scrollbar"
         >
           {isConnecting && (
-            <div className="text-yellow-400 font-mono">
+            <div className="text-yellow-400 font-mono flex items-center">
+              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
               Connecting to {serverName}...
             </div>
           )}
@@ -556,13 +623,13 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
                 onChange={(e) => setCurrentCommand(e.target.value)}
                 onKeyDown={handleKeyDown}
                 className="flex-1 bg-transparent text-green-400 font-mono outline-none"
-                placeholder={isCommandRunning ? "Command is running..." : "Type your command here..."}
+                placeholder={isCommandRunning ? "Command is running... (Ctrl+C to interrupt)" : "Type your command here..."}
                 disabled={isCommandRunning}
                 autoComplete="off"
                 spellCheck="false"
               />
               {isCommandRunning && (
-                <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-green-400"></div>
+                <Loader2 className="h-4 w-4 text-green-400 animate-spin" />
               )}
             </div>
           </div>
@@ -574,6 +641,11 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
         <div className="bg-gray-800 px-4 py-2 text-xs text-gray-400 border-t border-gray-700">
           Session: {sessionId} | Working Dir: {currentDir} | 
           Use ↑↓ arrows for command history | Tab for completion | Ctrl+C to interrupt
+          {isCommandRunning && (
+            <span className="ml-2 text-blue-400">
+              | <Loader2 className="h-3 w-3 inline animate-spin" /> Streaming output...
+            </span>
+          )}
         </div>
       )}
     </div>
