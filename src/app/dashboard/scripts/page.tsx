@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { 
   Play, 
   Square, 
@@ -11,11 +11,14 @@ import {
   Clock, 
   Terminal as TerminalIcon,
   ChevronDown,
-  ChevronUp
+  ChevronUp,
+  Maximize2,
+  Minimize2
 } from 'lucide-react';
 import { io, Socket } from 'socket.io-client';
 import Swal from 'sweetalert2';
 import Layout from '@/components/Layout';
+import MiniTerminal, { MiniTerminalRef } from '@/components/MiniTerminal';
 import { formatDuration } from '@/lib/utils';
 import type { Server, ApiResponse } from '@/types';
 
@@ -23,8 +26,6 @@ interface ServerTerminal {
   serverId: number;
   serverName: string;
   status: 'pending' | 'connecting' | 'running' | 'success' | 'failed';
-  output: string;
-  error: string;
   exitCode?: number;
   startTime?: Date;
   endTime?: Date;
@@ -69,9 +70,10 @@ export default function ScriptsPage() {
   // Terminal windows state
   const [terminals, setTerminals] = useState<Map<number, ServerTerminal>>(new Map());
   const [showTerminals, setShowTerminals] = useState(false);
+  const [isTerminalExpanded, setIsTerminalExpanded] = useState(false);
   
-  // Refs for auto-scrolling
-  const terminalRefs = useRef<Map<number, HTMLPreElement>>(new Map());
+  // Refs for MiniTerminal components
+  const terminalRefsMap = useRef<Map<number, MiniTerminalRef>>(new Map());
 
   useEffect(() => {
     fetchServers();
@@ -82,16 +84,6 @@ export default function ScriptsPage() {
       }
     };
   }, []);
-
-  // Auto-scroll effect for each terminal
-  useEffect(() => {
-    terminals.forEach((terminal, serverId) => {
-      const ref = terminalRefs.current.get(serverId);
-      if (ref && !terminal.isMinimized) {
-        ref.scrollTop = ref.scrollHeight;
-      }
-    });
-  }, [terminals]);
 
   const fetchServers = async () => {
     try {
@@ -114,6 +106,32 @@ export default function ScriptsPage() {
       setLoading(false);
     }
   };
+
+  // Write to specific terminal
+  const writeToTerminal = useCallback((serverId: number, data: string, type: 'stdout' | 'stderr' = 'stdout') => {
+    const terminalRef = terminalRefsMap.current.get(serverId);
+    if (terminalRef) {
+      if (type === 'stderr') {
+        // Write stderr in red color
+        terminalRef.write(`\x1b[31m${data}\x1b[0m`);
+      } else {
+        terminalRef.write(data);
+      }
+    }
+  }, []);
+
+  // Write line to specific terminal
+  const writeLineToTerminal = useCallback((serverId: number, data: string, color?: string) => {
+    const terminalRef = terminalRefsMap.current.get(serverId);
+    if (terminalRef) {
+      if (color) {
+        const colorCode = color === 'green' ? '32' : color === 'red' ? '31' : color === 'yellow' ? '33' : color === 'cyan' ? '36' : '0';
+        terminalRef.writeln(`\x1b[${colorCode}m${data}\x1b[0m`);
+      } else {
+        terminalRef.writeln(data);
+      }
+    }
+  }, []);
 
   const initializeSocket = () => {
     const token = localStorage.getItem('auth_token');
@@ -151,13 +169,18 @@ export default function ScriptsPage() {
           serverId: server.id,
           serverName: server.name,
           status: 'connecting',
-          output: '',
-          error: '',
           isMinimized: false,
           startTime: new Date()
         });
       });
       setTerminals(newTerminals);
+
+      // Write initial message to terminals after they're mounted
+      setTimeout(() => {
+        data.servers.forEach(server => {
+          writeLineToTerminal(server.id, `Connecting to ${server.name}...`, 'yellow');
+        });
+      }, 100);
     });
 
     // Handle streaming output - REAL-TIME DATA
@@ -169,23 +192,21 @@ export default function ScriptsPage() {
       data: string;
       timestamp: string;
     }) => {
+      // Update terminal status to running
       setTerminals(prev => {
         const newMap = new Map(prev);
         const terminal = newMap.get(data.serverId);
-        if (terminal) {
+        if (terminal && terminal.status !== 'success' && terminal.status !== 'failed') {
           newMap.set(data.serverId, {
             ...terminal,
-            status: 'running',
-            output: data.type === 'stdout' 
-              ? terminal.output + data.data 
-              : terminal.output,
-            error: data.type === 'stderr' 
-              ? terminal.error + data.data 
-              : terminal.error
+            status: 'running'
           });
         }
         return newMap;
       });
+
+      // Write to xterm
+      writeToTerminal(data.serverId, data.data, data.type);
     });
 
     // Handle progress updates
@@ -206,12 +227,25 @@ export default function ScriptsPage() {
             ...terminal,
             status: data.status,
             exitCode: data.exitCode,
-            endTime: data.isComplete ? new Date() : terminal.endTime,
-            error: data.error ? terminal.error + '\n' + data.error : terminal.error
+            endTime: data.isComplete ? new Date() : terminal.endTime
           });
         }
         return newMap;
       });
+
+      // Write status message to terminal
+      if (data.isComplete) {
+        if (data.status === 'success') {
+          writeLineToTerminal(data.serverId, '', undefined);
+          writeLineToTerminal(data.serverId, `✓ Command completed successfully (exit code: ${data.exitCode || 0})`, 'green');
+        } else if (data.status === 'failed') {
+          writeLineToTerminal(data.serverId, '', undefined);
+          if (data.error) {
+            writeLineToTerminal(data.serverId, `Error: ${data.error}`, 'red');
+          }
+          writeLineToTerminal(data.serverId, `✗ Command failed (exit code: ${data.exitCode})`, 'red');
+        }
+      }
     });
 
     // Handle script completed
@@ -269,9 +303,10 @@ export default function ScriptsPage() {
           if (terminal.status === 'running' || terminal.status === 'connecting' || terminal.status === 'pending') {
             newMap.set(serverId, {
               ...terminal,
-              status: 'failed',
-              error: terminal.error + '\n[Cancelled by user]'
+              status: 'failed'
             });
+            writeLineToTerminal(serverId, '', undefined);
+            writeLineToTerminal(serverId, '[Cancelled by user]', 'yellow');
           }
         });
         return newMap;
@@ -393,6 +428,7 @@ export default function ScriptsPage() {
     if (result.isConfirmed) {
       setIsRunning(true);
       setTerminals(new Map());
+      terminalRefsMap.current.clear();
 
       socket.emit('script:run', {
         scriptName: scriptName.trim(),
@@ -424,6 +460,7 @@ export default function ScriptsPage() {
   const clearResults = () => {
     setTerminals(new Map());
     setShowTerminals(false);
+    terminalRefsMap.current.clear();
   };
 
   const toggleTerminalMinimize = (serverId: number) => {
@@ -439,6 +476,15 @@ export default function ScriptsPage() {
       return newMap;
     });
   };
+
+  // Register terminal ref
+  const registerTerminalRef = useCallback((serverId: number, ref: MiniTerminalRef | null) => {
+    if (ref) {
+      terminalRefsMap.current.set(serverId, ref);
+    } else {
+      terminalRefsMap.current.delete(serverId);
+    }
+  }, []);
 
   const filteredServers = servers.filter(server => {
     const matchesSearch = server.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -466,20 +512,20 @@ export default function ScriptsPage() {
     }
   };
 
-  const getStatusBgColor = (status: string) => {
+  const getStatusBorderColor = (status: string) => {
     switch (status) {
       case 'pending':
-        return 'bg-gray-800';
+        return 'border-gray-600';
       case 'connecting':
-        return 'bg-yellow-900/30';
+        return 'border-yellow-600';
       case 'running':
-        return 'bg-blue-900/30';
+        return 'border-blue-600';
       case 'success':
-        return 'bg-green-900/30';
+        return 'border-green-600';
       case 'failed':
-        return 'bg-red-900/30';
+        return 'border-red-600';
       default:
-        return 'bg-gray-800';
+        return 'border-gray-600';
     }
   };
 
@@ -509,193 +555,6 @@ export default function ScriptsPage() {
             Execute scripts on multiple servers with <span className="text-blue-600 font-medium">real-time terminal output</span>
           </p>
         </div>
-
-        {/* Terminal Windows Section */}
-        {showTerminals && terminals.size > 0 && (
-          <div className="mb-6">
-            {/* Terminal Summary Bar */}
-            <div className="bg-gray-900 rounded-t-lg px-4 py-3 flex items-center justify-between border-b border-gray-700">
-              <div className="flex items-center space-x-4">
-                <TerminalIcon className="h-5 w-5 text-green-400" />
-                <span className="text-white font-medium">Live Terminal Output</span>
-                
-                {isRunning && (
-                  <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-900/50 text-blue-300 border border-blue-700">
-                    <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                    Running...
-                  </span>
-                )}
-              </div>
-              
-              <div className="flex items-center space-x-4">
-                {/* Progress Summary */}
-                <div className="flex items-center space-x-3 text-sm">
-                  <span className="text-gray-400">
-                    Progress: {completedCount}/{terminals.size}
-                  </span>
-                  {successCount > 0 && (
-                    <span className="text-green-400 flex items-center">
-                      <CheckCircle className="h-4 w-4 mr-1" />
-                      {successCount}
-                    </span>
-                  )}
-                  {failedCount > 0 && (
-                    <span className="text-red-400 flex items-center">
-                      <XCircle className="h-4 w-4 mr-1" />
-                      {failedCount}
-                    </span>
-                  )}
-                  {runningCount > 0 && (
-                    <span className="text-blue-400 flex items-center">
-                      <Loader2 className="h-4 w-4 mr-1 animate-spin" />
-                      {runningCount}
-                    </span>
-                  )}
-                </div>
-                
-                {!isRunning && (
-                  <button
-                    onClick={clearResults}
-                    className="text-gray-400 hover:text-white transition-colors text-sm"
-                  >
-                    Clear All
-                  </button>
-                )}
-              </div>
-            </div>
-            
-            {/* Terminal Grid */}
-            <div className={`grid ${getTerminalGridClass()} gap-0.5 bg-gray-700 rounded-b-lg overflow-hidden`}>
-              {Array.from(terminals.entries()).map(([serverId, terminal]) => (
-                <div 
-                  key={serverId}
-                  className={`flex flex-col ${getStatusBgColor(terminal.status)} transition-colors duration-300`}
-                >
-                  {/* Terminal Header */}
-                  <div className="flex items-center justify-between px-3 py-2 bg-gray-800/80 border-b border-gray-700">
-                    <div className="flex items-center space-x-2">
-                      {getStatusIcon(terminal.status)}
-                      <span className="text-white font-medium text-sm truncate max-w-[150px]">
-                        {terminal.serverName}
-                      </span>
-                      
-                      {terminal.status === 'success' && (
-                        <span className="text-xs text-green-400 bg-green-900/50 px-2 py-0.5 rounded">
-                          Exit: 0
-                        </span>
-                      )}
-                      {terminal.status === 'failed' && terminal.exitCode !== undefined && (
-                        <span className="text-xs text-red-400 bg-red-900/50 px-2 py-0.5 rounded">
-                          Exit: {terminal.exitCode}
-                        </span>
-                      )}
-                    </div>
-                    
-                    <div className="flex items-center space-x-1">
-                      {terminal.startTime && terminal.endTime && (
-                        <span className="text-xs text-gray-400 mr-2">
-                          {formatDuration(terminal.endTime.getTime() - terminal.startTime.getTime())}
-                        </span>
-                      )}
-                      <button
-                        onClick={() => toggleTerminalMinimize(serverId)}
-                        className="p-1 text-gray-400 hover:text-white rounded transition-colors"
-                      >
-                        {terminal.isMinimized ? (
-                          <ChevronDown className="h-4 w-4" />
-                        ) : (
-                          <ChevronUp className="h-4 w-4" />
-                        )}
-                      </button>
-                    </div>
-                  </div>
-                  
-                  {/* Terminal Content */}
-                  {!terminal.isMinimized && (
-                    <div className="flex-1 min-h-0">
-                      {/* Running/Pending State - Show Terminal */}
-                      {(terminal.status === 'running' || terminal.status === 'connecting' || terminal.status === 'pending') && (
-                        <div className="h-48 overflow-hidden">
-                          <pre
-                            ref={(el) => {
-                              if (el) terminalRefs.current.set(serverId, el);
-                            }}
-                            className="h-full overflow-auto p-3 text-xs font-mono text-green-400 bg-black/50 whitespace-pre-wrap break-all custom-scrollbar"
-                          >
-                            {terminal.status === 'connecting' && (
-                              <span className="text-yellow-400">Connecting to server...\n</span>
-                            )}
-                            {terminal.status === 'pending' && (
-                              <span className="text-gray-400">Waiting...</span>
-                            )}
-                            {terminal.output}
-                            {terminal.error && (
-                              <span className="text-red-400">{terminal.error}</span>
-                            )}
-                            {terminal.status === 'running' && (
-                              <span className="inline-block w-2 h-4 bg-green-400 ml-1 animate-pulse" />
-                            )}
-                          </pre>
-                        </div>
-                      )}
-                      
-                      {/* Completed State - Show Summary */}
-                      {(terminal.status === 'success' || terminal.status === 'failed') && (
-                        <div className={`p-4 ${terminal.status === 'success' ? 'bg-green-900/20' : 'bg-red-900/20'}`}>
-                          <div className="flex items-center justify-center space-x-3 mb-3">
-                            {terminal.status === 'success' ? (
-                              <>
-                                <CheckCircle className="h-8 w-8 text-green-400" />
-                                <span className="text-green-400 font-medium text-lg">Success</span>
-                              </>
-                            ) : (
-                              <>
-                                <XCircle className="h-8 w-8 text-red-400" />
-                                <span className="text-red-400 font-medium text-lg">Failed</span>
-                              </>
-                            )}
-                          </div>
-                          
-                          {/* Show last output or error preview */}
-                          {(terminal.output || terminal.error) && (
-                            <details className="mt-2">
-                              <summary className="text-xs text-gray-400 cursor-pointer hover:text-gray-300">
-                                View Output
-                              </summary>
-                              <pre className="mt-2 p-2 text-xs font-mono bg-black/30 rounded max-h-32 overflow-auto text-gray-300 whitespace-pre-wrap break-all">
-                                {terminal.output}
-                                {terminal.error && (
-                                  <span className="text-red-400">{terminal.error}</span>
-                                )}
-                              </pre>
-                            </details>
-                          )}
-                          
-                          {terminal.startTime && terminal.endTime && (
-                            <div className="text-xs text-gray-400 text-center mt-2">
-                              Duration: {formatDuration(terminal.endTime.getTime() - terminal.startTime.getTime())}
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  
-                  {/* Minimized State */}
-                  {terminal.isMinimized && (
-                    <div className="px-3 py-2 text-xs text-gray-400 bg-black/30">
-                      {terminal.status === 'running' && 'Running...'}
-                      {terminal.status === 'connecting' && 'Connecting...'}
-                      {terminal.status === 'pending' && 'Pending...'}
-                      {terminal.status === 'success' && '✓ Completed successfully'}
-                      {terminal.status === 'failed' && `✗ Failed (exit: ${terminal.exitCode})`}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Script Configuration */}
@@ -882,6 +741,146 @@ systemctl restart nginx"
             </div>
           </div>
         </div>
+
+        {/* Terminal Windows Section - MOVED TO BOTTOM */}
+        {showTerminals && terminals.size > 0 && (
+          <div className="mt-6">
+            {/* Terminal Summary Bar */}
+            <div className="bg-gray-900 rounded-t-lg px-4 py-3 flex items-center justify-between border-b border-gray-700">
+              <div className="flex items-center space-x-4">
+                <TerminalIcon className="h-5 w-5 text-green-400" />
+                <span className="text-white font-medium">Live Terminal Output</span>
+                
+                {isRunning && (
+                  <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-900/50 text-blue-300 border border-blue-700">
+                    <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                    Running...
+                  </span>
+                )}
+              </div>
+              
+              <div className="flex items-center space-x-4">
+                {/* Progress Summary */}
+                <div className="flex items-center space-x-3 text-sm">
+                  <span className="text-gray-400">
+                    Progress: {completedCount}/{terminals.size}
+                  </span>
+                  {successCount > 0 && (
+                    <span className="text-green-400 flex items-center">
+                      <CheckCircle className="h-4 w-4 mr-1" />
+                      {successCount}
+                    </span>
+                  )}
+                  {failedCount > 0 && (
+                    <span className="text-red-400 flex items-center">
+                      <XCircle className="h-4 w-4 mr-1" />
+                      {failedCount}
+                    </span>
+                  )}
+                  {runningCount > 0 && (
+                    <span className="text-blue-400 flex items-center">
+                      <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                      {runningCount}
+                    </span>
+                  )}
+                </div>
+
+                {/* Expand/Collapse Button */}
+                <button
+                  onClick={() => setIsTerminalExpanded(!isTerminalExpanded)}
+                  className="text-gray-400 hover:text-white transition-colors"
+                  title={isTerminalExpanded ? 'Collapse' : 'Expand'}
+                >
+                  {isTerminalExpanded ? (
+                    <Minimize2 className="h-4 w-4" />
+                  ) : (
+                    <Maximize2 className="h-4 w-4" />
+                  )}
+                </button>
+                
+                {!isRunning && (
+                  <button
+                    onClick={clearResults}
+                    className="text-gray-400 hover:text-white transition-colors text-sm"
+                  >
+                    Clear All
+                  </button>
+                )}
+              </div>
+            </div>
+            
+            {/* Terminal Grid */}
+            <div className={`grid ${getTerminalGridClass()} gap-0.5 bg-gray-700 rounded-b-lg overflow-hidden`}>
+              {Array.from(terminals.entries()).map(([serverId, terminal]) => (
+                <div 
+                  key={serverId}
+                  className={`flex flex-col bg-gray-800 border-l-2 ${getStatusBorderColor(terminal.status)} transition-colors duration-300`}
+                >
+                  {/* Terminal Header */}
+                  <div className="flex items-center justify-between px-3 py-2 bg-gray-800/80 border-b border-gray-700">
+                    <div className="flex items-center space-x-2">
+                      {getStatusIcon(terminal.status)}
+                      <span className="text-white font-medium text-sm truncate max-w-[150px]">
+                        {terminal.serverName}
+                      </span>
+                      
+                      {terminal.status === 'success' && (
+                        <span className="text-xs text-green-400 bg-green-900/50 px-2 py-0.5 rounded">
+                          Exit: 0
+                        </span>
+                      )}
+                      {terminal.status === 'failed' && terminal.exitCode !== undefined && (
+                        <span className="text-xs text-red-400 bg-red-900/50 px-2 py-0.5 rounded">
+                          Exit: {terminal.exitCode}
+                        </span>
+                      )}
+                    </div>
+                    
+                    <div className="flex items-center space-x-1">
+                      {terminal.startTime && terminal.endTime && (
+                        <span className="text-xs text-gray-400 mr-2">
+                          {formatDuration(terminal.endTime.getTime() - terminal.startTime.getTime())}
+                        </span>
+                      )}
+                      <button
+                        onClick={() => toggleTerminalMinimize(serverId)}
+                        className="p-1 text-gray-400 hover:text-white rounded transition-colors"
+                      >
+                        {terminal.isMinimized ? (
+                          <ChevronDown className="h-4 w-4" />
+                        ) : (
+                          <ChevronUp className="h-4 w-4" />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                  
+                  {/* Terminal Content using xterm.js */}
+                  {!terminal.isMinimized && (
+                    <div className="flex-1 min-h-0">
+                      <MiniTerminal
+                        ref={(ref) => registerTerminalRef(serverId, ref)}
+                        height={isTerminalExpanded ? 300 : 192}
+                        fontSize={12}
+                      />
+                    </div>
+                  )}
+                  
+                  {/* Minimized State */}
+                  {terminal.isMinimized && (
+                    <div className="px-3 py-2 text-xs text-gray-400 bg-gray-900/50">
+                      {terminal.status === 'running' && 'Running...'}
+                      {terminal.status === 'connecting' && 'Connecting...'}
+                      {terminal.status === 'pending' && 'Pending...'}
+                      {terminal.status === 'success' && '✓ Completed successfully'}
+                      {terminal.status === 'failed' && `✗ Failed (exit: ${terminal.exitCode})`}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </Layout>
   );
