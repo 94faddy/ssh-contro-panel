@@ -385,14 +385,20 @@ io.on('connection', (socket) => {
       const { scriptId, scriptName, command, serverIds, executionId } = data;
       const execId = executionId || `exec-${userId}-${Date.now()}`;
 
-      console.log(`Script execution requested: scriptId=${scriptId}, scriptName=${scriptName}, servers=${serverIds.join(',')}`);
+      console.log(`Script execution requested: scriptId=${scriptId}, scriptName=${scriptName}, servers=${serverIds?.join(',')}`);
+
+      // Validate serverIds
+      if (!serverIds || !Array.isArray(serverIds) || serverIds.length === 0) {
+        socket.emit('script:error', { executionId: execId, error: 'No servers specified' });
+        return;
+      }
 
       let finalCommand: string;
       let finalScriptName: string;
 
       // ตรวจสอบว่าใช้แบบไหน - scriptId หรือ command โดยตรง
       if (scriptId) {
-        // แบบเดิม - ใช้ scriptId
+        // แบบเดิม - ใช้ scriptId ดึงจาก database
         const script = await prisma.script.findUnique({
           where: { id: scriptId },
         });
@@ -447,12 +453,15 @@ io.on('connection', (socket) => {
         startTime: new Date()
       });
 
+      // Emit script started - ส่งข้อมูล servers ไปด้วย
       socket.emit('script:started', { 
         executionId: execId,
         scriptName: finalScriptName,
         serverCount: servers.length,
         servers: servers.map(s => ({ id: s.id, name: s.name }))
       });
+
+      console.log(`Script "${finalScriptName}" started on ${servers.length} servers`);
 
       let successCount = 0;
       let failedCount = 0;
@@ -461,9 +470,11 @@ io.on('connection', (socket) => {
       for (const server of servers) {
         const execution = scriptExecutions.get(execId);
         if (!execution || !execution.isRunning) {
+          console.log(`Script execution ${execId} was cancelled`);
           break;
         }
 
+        // Emit progress - connecting
         socket.emit('script:progress', {
           executionId: execId,
           serverId: server.id,
@@ -475,12 +486,18 @@ io.on('connection', (socket) => {
         try {
           let exitCode = 0;
           
+          // Execute command with streaming
           await executeCommandStreaming(
             server.id,
             userId,
             finalCommand,
             (type, streamData) => {
+              // Check if still running
+              const exec = scriptExecutions.get(execId);
+              if (!exec || !exec.isRunning) return;
+
               if (type === 'stdout' || type === 'stderr') {
+                // Stream data to client in real-time
                 socket.emit('script:stream', {
                   executionId: execId,
                   serverId: server.id,
@@ -503,6 +520,7 @@ io.on('connection', (socket) => {
             failedCount++;
           }
 
+          // Emit progress - complete
           socket.emit('script:progress', {
             executionId: execId,
             serverId: server.id,
@@ -512,22 +530,31 @@ io.on('connection', (socket) => {
             isComplete: true
           });
 
+          console.log(`Server ${server.name}: ${success ? 'success' : 'failed'} (exit: ${exitCode})`);
+
         } catch (error) {
           failedCount++;
           
+          const errorMessage = error instanceof Error ? error.message : 'Execution failed';
+          
+          // Emit progress - error
           socket.emit('script:progress', {
             executionId: execId,
             serverId: server.id,
             serverName: server.name,
             status: 'failed',
-            error: error instanceof Error ? error.message : 'Execution failed',
+            error: errorMessage,
             isComplete: true
           });
+
+          console.error(`Server ${server.name} error:`, errorMessage);
         }
       }
 
+      // Cleanup
       scriptExecutions.delete(execId);
       
+      // Emit completed
       socket.emit('script:completed', { 
         executionId: execId,
         scriptName: finalScriptName,
@@ -537,6 +564,7 @@ io.on('connection', (socket) => {
       });
 
       console.log(`Script "${finalScriptName}" completed: ${successCount} success, ${failedCount} failed`);
+
     } catch (error) {
       console.error('Script execution error:', error);
       socket.emit('script:error', { 
@@ -561,7 +589,7 @@ io.on('connection', (socket) => {
         scriptExecutions.delete(executionId);
         
         socket.emit('script:cancelled', { executionId });
-        console.log(`Script execution ${executionId} cancelled`);
+        console.log(`Script execution ${executionId} cancelled by user`);
       }
     } catch (error) {
       console.error('Script cancel error:', error);

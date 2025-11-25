@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { X, Maximize2, Minimize2, RotateCcw, Download, Loader2 } from 'lucide-react';
+import { X, RotateCcw, Download, Loader2 } from 'lucide-react';
 import { io, Socket } from 'socket.io-client';
 import type { TerminalProps } from '@/types';
 
@@ -32,11 +32,9 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
-  const [isMaximized, setIsMaximized] = useState(false);
   const [currentDir, setCurrentDir] = useState('~');
   
   const terminalContainerRef = useRef<HTMLDivElement>(null);
-  const terminalWrapperRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<any>(null);
   const fitAddonRef = useRef<any>(null);
   const socketRef = useRef<Socket | null>(null);
@@ -121,7 +119,7 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
       if (xtermRef.current) {
         xtermRef.current.writeln('');
         xtermRef.current.writeln(`\x1b[1;32mConnected to ${data.serverName}\x1b[0m`);
-        xtermRef.current.writeln(`\x1b[90mworking directory: ${data.currentDir}\x1b[0m`);
+        xtermRef.current.writeln(`\x1b[90mWorking directory: ${data.currentDir}\x1b[0m`);
         xtermRef.current.writeln('');
         xtermRef.current.write('\x1b[?25h');
       }
@@ -178,7 +176,7 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
 
   }, [serverId, fitTerminal]);
 
-  // Initialize xterm.js - ใช้ useEffect แยกและมี cleanup ที่ดี
+  // Initialize xterm.js
   useEffect(() => {
     // ป้องกันการ initialize ซ้ำ
     if (isInitializedRef.current) {
@@ -207,7 +205,7 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
         return;
       }
 
-      // Create terminal with optimized settings
+      // Create terminal
       terminal = new Terminal({
         cursorBlink: true,
         cursorStyle: 'block',
@@ -257,14 +255,14 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
       xtermRef.current = terminal;
       fitAddonRef.current = fitAddon;
 
-      // Initial fit with delay to ensure container is ready
+      // Initial fit
       setTimeout(() => {
         if (!isCleanedUp) {
           fitAddon.fit();
         }
       }, 50);
 
-      // Handle user input - send directly to server
+      // Handle user input
       terminal.onData((data: string) => {
         if (socketRef.current && sessionIdRef.current) {
           socketRef.current.emit('terminal:input', {
@@ -291,20 +289,20 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
       terminal.writeln('\x1b[1;36m╚══════════════════════════════════════════════════════════════╝\x1b[0m');
       terminal.writeln('');
       terminal.writeln('\x1b[33mConnecting to server...\x1b[0m');
-      terminal.write('\x1b[?25l'); // Hide cursor while connecting
+      terminal.write('\x1b[?25l');
 
-      // Set up ResizeObserver for container
+      // Set up ResizeObserver
       resizeObserver = new ResizeObserver(() => {
-        if (!isCleanedUp) {
+        if (!isCleanedUp && fitAddon) {
           setTimeout(() => fitAddon.fit(), 10);
         }
       });
       
-      if (terminalWrapperRef.current) {
-        resizeObserver.observe(terminalWrapperRef.current);
+      if (terminalContainerRef.current) {
+        resizeObserver.observe(terminalContainerRef.current);
       }
 
-      // Connect to WebSocket after xterm is ready
+      // Connect to WebSocket
       if (!isCleanedUp) {
         connectToServer();
       }
@@ -314,7 +312,7 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
 
     // Handle window resize
     const handleResize = () => {
-      if (!isCleanedUp && fitAddonRef.current) {
+      if (fitAddonRef.current) {
         setTimeout(() => fitAddonRef.current?.fit(), 50);
       }
     };
@@ -351,13 +349,6 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
     };
   }, [serverId, connectToServer]);
 
-  // Fit terminal when maximized state changes
-  useEffect(() => {
-    if (xtermRef.current && fitAddonRef.current) {
-      setTimeout(fitTerminal, 100);
-    }
-  }, [isMaximized, fitTerminal]);
-
   const handleClose = useCallback(() => {
     if (socketRef.current && sessionIdRef.current) {
       socketRef.current.emit('terminal:disconnect', { sessionId: sessionIdRef.current });
@@ -367,7 +358,6 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
   }, [onClose]);
 
   const reconnect = useCallback(() => {
-    // Reset flags
     isConnectingRef.current = false;
     
     if (socketRef.current) {
@@ -384,7 +374,6 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
     setSessionId(null);
     sessionIdRef.current = null;
     
-    // เรียก connect ใหม่
     setTimeout(() => {
       connectToServer();
     }, 100);
@@ -399,7 +388,6 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
   const downloadLog = useCallback(() => {
     if (!xtermRef.current) return;
     
-    // Get terminal buffer content
     const buffer = xtermRef.current.buffer.active;
     let content = '';
     
@@ -410,7 +398,6 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
       }
     }
     
-    // Create and download file
     const blob = new Blob([content], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -423,13 +410,7 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
   }, [serverName]);
 
   return (
-    <div 
-      className={`flex flex-col bg-gray-900 rounded-lg overflow-hidden shadow-2xl border border-gray-700 ${
-        isMaximized 
-          ? 'fixed inset-4 z-50' 
-          : 'w-full h-full'
-      }`}
-    >
+    <div className="flex flex-col bg-gray-900 rounded-lg overflow-hidden shadow-2xl border border-gray-700 w-full h-full">
       {/* Title Bar */}
       <div className="bg-gray-800 px-4 py-2 flex items-center justify-between flex-shrink-0 border-b border-gray-700">
         <div className="flex items-center space-x-3">
@@ -440,11 +421,7 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
               className="w-3 h-3 bg-red-500 rounded-full hover:bg-red-600 transition-colors"
               title="Close"
             />
-            <button
-              onClick={() => setIsMaximized(!isMaximized)}
-              className="w-3 h-3 bg-yellow-500 rounded-full hover:bg-yellow-600 transition-colors"
-              title={isMaximized ? "Restore" : "Maximize"}
-            />
+            <div className="w-3 h-3 bg-yellow-500 rounded-full"></div>
             <div className="w-3 h-3 bg-green-500 rounded-full"></div>
           </div>
           <div className="text-white font-medium flex items-center text-sm">
@@ -479,13 +456,6 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
             <RotateCcw className="h-4 w-4" />
           </button>
           <button
-            onClick={() => setIsMaximized(!isMaximized)}
-            className="p-1.5 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors"
-            title={isMaximized ? "Restore" : "Maximize"}
-          >
-            {isMaximized ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
-          </button>
-          <button
             onClick={handleClose}
             className="p-1.5 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors"
             title="Close terminal"
@@ -495,9 +465,8 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
         </div>
       </div>
 
-      {/* Terminal Content - xterm.js container */}
+      {/* Terminal Content */}
       <div 
-        ref={terminalWrapperRef}
         className="flex-1 min-h-0 overflow-hidden"
         style={{ backgroundColor: '#0d1117' }}
       >
@@ -541,7 +510,7 @@ export default function Terminal({ serverId, serverName, onClose }: TerminalProp
 
       {/* Reconnect overlay */}
       {!isConnected && !isConnecting && (
-        <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center">
+        <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center rounded-lg">
           <div className="text-center">
             <p className="text-gray-300 mb-4">Connection lost</p>
             <button
