@@ -1,11 +1,36 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { hashPassword, generateToken, withAdminAuth } from '@/lib/auth';
+import { hashPassword } from '@/lib/auth';
 import { prisma } from '@/lib/database';
 import { validateEmail } from '@/lib/utils';
 import type { RegisterData, ApiResponse, User } from '@/types';
 
-export const POST = withAdminAuth(async (request: NextRequest) => {
+// POST /api/auth/register-public - Public registration (if enabled)
+export async function POST(request: NextRequest) {
   try {
+    // Check if registration is enabled
+    let registrationEnabled = true; // Default to true
+    
+    try {
+      const settingsRecord = await prisma.systemSettings.findFirst({
+        where: { key: 'system' }
+      });
+      
+      if (settingsRecord) {
+        const settings = settingsRecord.value as any;
+        registrationEnabled = settings.enableRegistration !== false;
+      }
+    } catch (e) {
+      // If table doesn't exist, default to enabled
+      registrationEnabled = true;
+    }
+
+    if (!registrationEnabled) {
+      return NextResponse.json<ApiResponse>({
+        success: false,
+        error: 'Registration is currently disabled'
+      }, { status: 403 });
+    }
+
     const body = await request.json() as RegisterData;
     const { email, password, name, role = 'DEVELOPER' } = body;
 
@@ -31,12 +56,16 @@ export const POST = withAdminAuth(async (request: NextRequest) => {
       }, { status: 400 });
     }
 
-    if (!['ADMIN', 'DEVELOPER'].includes(role)) {
+    if (name.length < 2) {
       return NextResponse.json<ApiResponse>({
         success: false,
-        error: 'Invalid role specified'
+        error: 'Name must be at least 2 characters long'
       }, { status: 400 });
     }
+
+    // For public registration, always set role to DEVELOPER
+    // Admins can only be created by other admins
+    const userRole = 'DEVELOPER';
 
     // Check if user already exists
     const existingUser = await prisma.user.findUnique({
@@ -59,7 +88,7 @@ export const POST = withAdminAuth(async (request: NextRequest) => {
         email,
         password: hashedPassword,
         name,
-        role: role as 'ADMIN' | 'DEVELOPER',
+        role: userRole,
         isActive: true
       },
       select: {
@@ -82,14 +111,14 @@ export const POST = withAdminAuth(async (request: NextRequest) => {
     return NextResponse.json<ApiResponse<User>>({
       success: true,
       data: user,
-      message: 'User created successfully'
+      message: 'Registration successful'
     }, { status: 201 });
 
   } catch (error) {
-    console.error('Registration error:', error);
+    console.error('Public registration error:', error);
     return NextResponse.json<ApiResponse>({
       success: false,
       error: 'Internal server error'
     }, { status: 500 });
   }
-});
+}

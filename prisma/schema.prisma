@@ -1,3 +1,6 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
 generator client {
   provider = "prisma-client-js"
 }
@@ -8,102 +11,88 @@ datasource db {
 }
 
 model User {
-  id          Int      @id @default(autoincrement())
-  email       String   @unique
-  password    String
-  name        String
-  role        Role     @default(DEVELOPER)
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  
-  // Relations
+  id        Int       @id @default(autoincrement())
+  email     String    @unique
+  password  String
+  name      String
+  role      String    @default("DEVELOPER") // ADMIN, DEVELOPER
+  isActive  Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
   servers     Server[]
   scriptLogs  ScriptLog[]
-  
-  @@map("users")
+
+  @@index([email])
+  @@index([role])
 }
 
 model Server {
-  id          Int      @id @default(autoincrement())
-  name        String   // ชื่อหรือ note สำหรับจำ
-  host        String   // IP address
-  port        Int      @default(22)
-  username    String   // SSH username
-  password    String   // SSH password (encrypted)
-  isActive    Boolean  @default(true)
-  status      ServerStatus @default(DISCONNECTED)
+  id          Int       @id @default(autoincrement())
+  name        String
+  host        String
+  port        Int       @default(22)
+  username    String
+  password    String
+  isActive    Boolean   @default(true)
+  status      String    @default("DISCONNECTED") // CONNECTED, DISCONNECTED, ERROR, CONNECTING
   lastChecked DateTime?
-  systemInfo  Json?    // เก็บข้อมูล system info
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  
-  // Relations
+  systemInfo  Json?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
   userId      Int
-  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  scriptLogs  ScriptLog[]
-  serverLogs  ServerLog[]
-  
-  @@map("servers")
-}
 
-model ScriptLog {
-  id          Int      @id @default(autoincrement())
-  scriptName  String
-  command     String   @db.Text
-  status      ScriptStatus @default(RUNNING)
-  output      String?  @db.LongText
-  error       String?  @db.Text
-  startTime   DateTime @default(now())
-  endTime     DateTime?
-  duration    Int?     // seconds
-  
-  // Relations
-  userId      Int
-  user        User     @relation(fields: [userId], references: [id])
-  serverId    Int
-  server      Server   @relation(fields: [serverId], references: [id], onDelete: Cascade)
-  
-  @@map("script_logs")
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  serverLogs  ServerLog[]
+  scriptLogs  ScriptLog[]
+
+  @@index([userId])
+  @@index([status])
+  @@index([host])
 }
 
 model ServerLog {
-  id          Int      @id @default(autoincrement())
-  logType     LogType
-  message     String   @db.Text
-  data        Json?
-  timestamp   DateTime @default(now())
-  
-  // Relations
-  serverId    Int
-  server      Server   @relation(fields: [serverId], references: [id], onDelete: Cascade)
-  
-  @@map("server_logs")
+  id        Int      @id @default(autoincrement())
+  serverId  Int
+  logType   String   // COMMAND, ERROR, INFO, WARNING
+  message   String   @db.Text
+  data      Json?
+  createdAt DateTime @default(now())
+
+  server Server @relation(fields: [serverId], references: [id], onDelete: Cascade)
+
+  @@index([serverId])
+  @@index([logType])
+  @@index([createdAt])
 }
 
-enum Role {
-  ADMIN
-  DEVELOPER
+model ScriptLog {
+  id         Int       @id @default(autoincrement())
+  scriptName String
+  command    String    @db.Text
+  status     String    @default("RUNNING") // RUNNING, SUCCESS, FAILED, CANCELLED
+  output     String?   @db.LongText
+  error      String?   @db.Text
+  startTime  DateTime  @default(now())
+  endTime    DateTime?
+  duration   Int?
+  userId     Int
+  serverId   Int
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  server Server @relation(fields: [serverId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([serverId])
+  @@index([status])
+  @@index([startTime])
 }
 
-enum ServerStatus {
-  CONNECTED
-  DISCONNECTED
-  ERROR
-  CONNECTING
-}
+model SystemSettings {
+  key       String   @id @unique
+  value     Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-enum ScriptStatus {
-  RUNNING
-  SUCCESS
-  FAILED
-  CANCELLED
-}
-
-enum LogType {
-  CONNECTION
-  COMMAND
-  ERROR
-  SYSTEM
-  AUTH
+  @@index([key])
 }

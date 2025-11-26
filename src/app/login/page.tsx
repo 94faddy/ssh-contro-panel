@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { Eye, EyeOff, Server, Lock, Mail, LogIn } from 'lucide-react';
 import Swal from 'sweetalert2';
 import type { LoginCredentials, ApiResponse, User } from '@/types';
@@ -14,6 +15,7 @@ export default function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [errors, setErrors] = useState<Partial<LoginCredentials>>({});
+  const [registrationEnabled, setRegistrationEnabled] = useState(false);
   
   const router = useRouter();
 
@@ -24,6 +26,9 @@ export default function LoginPage() {
       // Verify token and redirect if valid
       verifyToken(token);
     }
+
+    // Check registration status
+    checkRegistrationStatus();
   }, []);
 
   const verifyToken = async (token: string) => {
@@ -41,6 +46,19 @@ export default function LoginPage() {
       }
     } catch (error) {
       localStorage.removeItem('auth_token');
+    }
+  };
+
+  const checkRegistrationStatus = async () => {
+    try {
+      const response = await fetch('/api/settings/registration-status');
+      if (response.ok) {
+        const data = await response.json();
+        setRegistrationEnabled(data.enabled);
+      }
+    } catch (error) {
+      // Default to enabled if can't check
+      setRegistrationEnabled(true);
     }
   };
 
@@ -230,6 +248,18 @@ export default function LoginPage() {
               </button>
             </div>
           </form>
+
+          {/* Register Link - Only show if registration is enabled */}
+          {registrationEnabled && (
+            <div className="mt-6 text-center">
+              <p className="text-sm text-gray-600">
+                ยังไม่มีบัญชี?{' '}
+                <Link href="/register" className="text-blue-600 hover:text-blue-800 font-medium">
+                  สมัครสมาชิก
+                </Link>
+              </p>
+            </div>
+          )}
         </div>
 
         {/* Footer */}

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { 
   Settings, 
   User, 
@@ -21,7 +21,8 @@ import {
   Globe,
   Clock,
   HardDrive,
-  Activity
+  Activity,
+  ExternalLink
 } from 'lucide-react';
 import Layout from '@/components/Layout';
 import Swal from 'sweetalert2';
@@ -53,29 +54,28 @@ interface SecuritySettings {
   ipWhitelist: string[];
 }
 
-interface NotificationSettings {
-  emailEnabled: boolean;
-  emailHost: string;
-  emailPort: number;
-  emailUsername: string;
-  emailPassword: string;
-  emailFromAddress: string;
-  enableServerAlerts: boolean;
-  enableScriptAlerts: boolean;
-  enableSecurityAlerts: boolean;
-  alertThresholds: {
-    cpuUsage: number;
-    memoryUsage: number;
-    diskUsage: number;
-  };
-}
-
 interface ProfileFormData {
   name: string;
   email: string;
   currentPassword: string;
   newPassword: string;
   confirmPassword: string;
+}
+
+interface SystemInfo {
+  version: string;
+  uptime: string;
+  totalUsers: number;
+  totalServers: number;
+  totalConnections: number;
+  memoryUsage: number;
+  diskUsage: number;
+  cpuUsage: number;
+  lastBackup: string;
+  databaseSize: string;
+  nodeVersion?: string;
+  platform?: string;
+  hostname?: string;
 }
 
 function ProfileSettings() {
@@ -123,6 +123,15 @@ function ProfileSettings() {
       Swal.fire({
         title: 'ข้อผิดพลาด',
         text: 'รหัสผ่านใหม่ไม่ตรงกัน',
+        icon: 'error'
+      });
+      return;
+    }
+
+    if (formData.newPassword && formData.newPassword.length < 6) {
+      Swal.fire({
+        title: 'ข้อผิดพลาด',
+        text: 'รหัสผ่านใหม่ต้องมีอย่างน้อย 6 ตัวอักษร',
         icon: 'error'
       });
       return;
@@ -334,6 +343,31 @@ function SystemSettingsPanel() {
     logRetentionDays: 90
   });
   const [loading, setLoading] = useState(false);
+  const [fetchLoading, setFetchLoading] = useState(true);
+
+  const fetchSettings = useCallback(async () => {
+    try {
+      const token = localStorage.getItem('auth_token');
+      const response = await fetch('/api/settings/system', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+
+      if (response.ok) {
+        const data: ApiResponse<SystemSettings> = await response.json();
+        if (data.success && data.data) {
+          setSettings(data.data);
+        }
+      }
+    } catch (error) {
+      console.error('Failed to fetch settings:', error);
+    } finally {
+      setFetchLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchSettings();
+  }, [fetchSettings]);
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
     const { name, value, type } = e.target;
@@ -382,6 +416,21 @@ function SystemSettingsPanel() {
       setLoading(false);
     }
   };
+
+  if (fetchLoading) {
+    return (
+      <div className="bg-white shadow-soft rounded-lg p-6">
+        <div className="animate-pulse">
+          <div className="h-6 bg-gray-200 rounded w-1/4 mb-4"></div>
+          <div className="space-y-4">
+            {[...Array(6)].map((_, i) => (
+              <div key={i} className="h-10 bg-gray-200 rounded"></div>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="bg-white shadow-soft rounded-lg p-6">
@@ -473,7 +522,7 @@ function SystemSettingsPanel() {
           <h4 className="text-md font-medium text-gray-900 mb-4">ฟีเจอร์</h4>
           
           <div className="space-y-4">
-            <label className="inline-flex items-center">
+            <label className="flex items-center">
               <input
                 type="checkbox"
                 name="enableRegistration"
@@ -481,10 +530,13 @@ function SystemSettingsPanel() {
                 onChange={handleInputChange}
                 className="rounded border-gray-300 text-blue-600 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50"
               />
-              <span className="ml-2 text-sm text-gray-700">เปิดใช้งานการสมัครสมาชิก</span>
+              <span className="ml-2 text-sm text-gray-700">
+                เปิดใช้งานการสมัครสมาชิก
+                <span className="text-gray-500 ml-2">(อนุญาตให้ผู้ใช้สมัครสมาชิกได้ที่หน้า /register)</span>
+              </span>
             </label>
 
-            <label className="inline-flex items-center">
+            <label className="flex items-center">
               <input
                 type="checkbox"
                 name="enableEmailNotifications"
@@ -495,7 +547,7 @@ function SystemSettingsPanel() {
               <span className="ml-2 text-sm text-gray-700">เปิดใช้งานการแจ้งเตือนทางอีเมล</span>
             </label>
 
-            <label className="inline-flex items-center">
+            <label className="flex items-center">
               <input
                 type="checkbox"
                 name="enableSyslogExport"
@@ -580,6 +632,31 @@ function SecuritySettingsPanel() {
   });
   const [newIp, setNewIp] = useState('');
   const [loading, setLoading] = useState(false);
+  const [fetchLoading, setFetchLoading] = useState(true);
+
+  const fetchSettings = useCallback(async () => {
+    try {
+      const token = localStorage.getItem('auth_token');
+      const response = await fetch('/api/settings/security', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+
+      if (response.ok) {
+        const data: ApiResponse<SecuritySettings> = await response.json();
+        if (data.success && data.data) {
+          setSettings(data.data);
+        }
+      }
+    } catch (error) {
+      console.error('Failed to fetch security settings:', error);
+    } finally {
+      setFetchLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchSettings();
+  }, [fetchSettings]);
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value, type, checked } = e.target;
@@ -591,6 +668,17 @@ function SecuritySettingsPanel() {
 
   const addIpToWhitelist = () => {
     if (newIp && !settings.ipWhitelist.includes(newIp)) {
+      // Basic IP validation
+      const ipRegex = /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)(?:\/\d{1,2})?$/;
+      if (!ipRegex.test(newIp) && newIp !== 'localhost') {
+        Swal.fire({
+          title: 'รูปแบบไม่ถูกต้อง',
+          text: 'กรุณากรอก IP Address ที่ถูกต้อง (เช่น 192.168.1.0/24)',
+          icon: 'warning'
+        });
+        return;
+      }
+      
       setSettings(prev => ({
         ...prev,
         ipWhitelist: [...prev.ipWhitelist, newIp]
@@ -645,6 +733,21 @@ function SecuritySettingsPanel() {
     }
   };
 
+  if (fetchLoading) {
+    return (
+      <div className="bg-white shadow-soft rounded-lg p-6">
+        <div className="animate-pulse">
+          <div className="h-6 bg-gray-200 rounded w-1/4 mb-4"></div>
+          <div className="space-y-4">
+            {[...Array(6)].map((_, i) => (
+              <div key={i} className="h-10 bg-gray-200 rounded"></div>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="bg-white shadow-soft rounded-lg p-6">
       <div className="flex items-center mb-6">
@@ -673,7 +776,7 @@ function SecuritySettingsPanel() {
           </div>
 
           <div className="space-y-3">
-            <label className="inline-flex items-center">
+            <label className="flex items-center">
               <input
                 type="checkbox"
                 name="passwordRequireUppercase"
@@ -684,7 +787,7 @@ function SecuritySettingsPanel() {
               <span className="ml-2 text-sm text-gray-700">ต้องมีตัวอักษรพิมพ์ใหญ่</span>
             </label>
 
-            <label className="inline-flex items-center">
+            <label className="flex items-center">
               <input
                 type="checkbox"
                 name="passwordRequireNumbers"
@@ -695,7 +798,7 @@ function SecuritySettingsPanel() {
               <span className="ml-2 text-sm text-gray-700">ต้องมีตัวเลข</span>
             </label>
 
-            <label className="inline-flex items-center">
+            <label className="flex items-center">
               <input
                 type="checkbox"
                 name="passwordRequireSymbols"
@@ -744,6 +847,9 @@ function SecuritySettingsPanel() {
         {/* IP Whitelist */}
         <div className="border-t pt-6">
           <h4 className="text-md font-medium text-gray-900 mb-4">รายการ IP ที่อนุญาต</h4>
+          <p className="text-sm text-gray-500 mb-4">
+            หากกำหนดรายการ IP ที่อนุญาต จะมีเฉพาะ IP เหล่านี้เท่านั้นที่สามารถเข้าถึงระบบได้
+          </p>
           
           <div className="mb-4">
             <div className="flex space-x-2">
@@ -753,6 +859,12 @@ function SecuritySettingsPanel() {
                 onChange={(e) => setNewIp(e.target.value)}
                 placeholder="เพิ่ม IP Address (เช่น 192.168.1.0/24)"
                 className="form-input flex-1"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    addIpToWhitelist();
+                  }
+                }}
               />
               <button
                 type="button"
@@ -764,11 +876,11 @@ function SecuritySettingsPanel() {
             </div>
           </div>
 
-          {settings.ipWhitelist.length > 0 && (
+          {settings.ipWhitelist.length > 0 ? (
             <div className="space-y-2">
               {settings.ipWhitelist.map((ip, index) => (
                 <div key={index} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-                  <span className="text-sm text-gray-700">{ip}</span>
+                  <span className="text-sm text-gray-700 font-mono">{ip}</span>
                   <button
                     type="button"
                     onClick={() => removeIpFromWhitelist(ip)}
@@ -779,12 +891,14 @@ function SecuritySettingsPanel() {
                 </div>
               ))}
             </div>
+          ) : (
+            <p className="text-sm text-gray-500 italic">ไม่มีการจำกัด IP (อนุญาตทุก IP)</p>
           )}
         </div>
 
         {/* Two-Factor Authentication */}
         <div className="border-t pt-6">
-          <label className="inline-flex items-center">
+          <label className="flex items-center">
             <input
               type="checkbox"
               name="enableTwoFactor"
@@ -792,7 +906,10 @@ function SecuritySettingsPanel() {
               onChange={handleInputChange}
               className="rounded border-gray-300 text-blue-600 shadow-sm focus:border-blue-300 focus:ring focus:ring-blue-200 focus:ring-opacity-50"
             />
-            <span className="ml-2 text-sm text-gray-700">เปิดใช้งานการยืนยันตัวตนสองขั้นตอน (2FA)</span>
+            <span className="ml-2 text-sm text-gray-700">
+              เปิดใช้งานการยืนยันตัวตนสองขั้นตอน (2FA)
+              <span className="text-yellow-600 ml-2">(ยังไม่รองรับในเวอร์ชันนี้)</span>
+            </span>
           </label>
         </div>
 
@@ -822,18 +939,47 @@ function SecuritySettingsPanel() {
 }
 
 function SystemInfoPanel() {
-  const [systemInfo, setSystemInfo] = useState({
+  const [systemInfo, setSystemInfo] = useState<SystemInfo>({
     version: '1.0.0',
-    uptime: '5 days, 12 hours',
-    totalUsers: 12,
-    totalServers: 25,
-    totalConnections: 45,
-    memoryUsage: 65,
-    diskUsage: 42,
-    cpuUsage: 23,
-    lastBackup: '2024-01-15 14:30:00',
-    databaseSize: '156 MB'
+    uptime: 'กำลังโหลด...',
+    totalUsers: 0,
+    totalServers: 0,
+    totalConnections: 0,
+    memoryUsage: 0,
+    diskUsage: 0,
+    cpuUsage: 0,
+    lastBackup: 'ไม่มีข้อมูล',
+    databaseSize: 'กำลังคำนวณ...'
   });
+  const [loading, setLoading] = useState(true);
+
+  const fetchSystemInfo = useCallback(async () => {
+    try {
+      const token = localStorage.getItem('auth_token');
+      const response = await fetch('/api/system/info', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+
+      if (response.ok) {
+        const data: ApiResponse<SystemInfo> = await response.json();
+        if (data.success && data.data) {
+          setSystemInfo(data.data);
+        }
+      }
+    } catch (error) {
+      console.error('Failed to fetch system info:', error);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchSystemInfo();
+    
+    // Refresh every 30 seconds
+    const interval = setInterval(fetchSystemInfo, 30000);
+    return () => clearInterval(interval);
+  }, [fetchSystemInfo]);
 
   const exportSystemLogs = async () => {
     try {
@@ -847,7 +993,7 @@ function SystemInfoPanel() {
         const url = window.URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `system-logs-${new Date().toISOString().split('T')[0]}.zip`;
+        a.download = `system-logs-${new Date().toISOString().split('T')[0]}.json`;
         document.body.appendChild(a);
         a.click();
         window.URL.revokeObjectURL(url);
@@ -860,6 +1006,8 @@ function SystemInfoPanel() {
           timer: 1500,
           showConfirmButton: false
         });
+      } else {
+        throw new Error('Export failed');
       }
     } catch (error) {
       Swal.fire({
@@ -882,6 +1030,15 @@ function SystemInfoPanel() {
 
     if (result.isConfirmed) {
       try {
+        Swal.fire({
+          title: 'กำลังสร้าง Backup...',
+          text: 'กรุณารอสักครู่',
+          allowOutsideClick: false,
+          didOpen: () => {
+            Swal.showLoading();
+          }
+        });
+
         const token = localStorage.getItem('auth_token');
         const response = await fetch('/api/system/backup', {
           method: 'POST',
@@ -891,11 +1048,14 @@ function SystemInfoPanel() {
         const data: ApiResponse = await response.json();
 
         if (data.success) {
-          Swal.fire({
+          await Swal.fire({
             title: 'สร้าง Backup สำเร็จ!',
             text: 'ระบบได้สร้าง backup เรียบร้อยแล้ว',
             icon: 'success'
           });
+          
+          // Refresh system info
+          fetchSystemInfo();
         } else {
           throw new Error(data.error || 'การสร้าง backup ล้มเหลว');
         }
@@ -911,9 +1071,18 @@ function SystemInfoPanel() {
 
   return (
     <div className="bg-white shadow-soft rounded-lg p-6">
-      <div className="flex items-center mb-6">
-        <Database className="h-6 w-6 text-green-600 mr-3" />
-        <h3 className="text-lg font-medium text-gray-900">ข้อมูลระบบ</h3>
+      <div className="flex items-center justify-between mb-6">
+        <div className="flex items-center">
+          <Database className="h-6 w-6 text-green-600 mr-3" />
+          <h3 className="text-lg font-medium text-gray-900">ข้อมูลระบบ</h3>
+        </div>
+        <button
+          onClick={fetchSystemInfo}
+          className="text-gray-500 hover:text-gray-700"
+          title="รีเฟรช"
+        >
+          <RefreshCw className={`h-5 w-5 ${loading ? 'animate-spin' : ''}`} />
+        </button>
       </div>
 
       {/* System Stats */}
@@ -933,7 +1102,7 @@ function SystemInfoPanel() {
         <div className="text-center p-4 bg-purple-50 rounded-lg">
           <Globe className="h-8 w-8 text-purple-600 mx-auto mb-2" />
           <h4 className="text-lg font-semibold text-gray-900">{systemInfo.totalConnections}</h4>
-          <p className="text-sm text-gray-500">การเชื่อมต่อทั้งหมด</p>
+          <p className="text-sm text-gray-500">การเชื่อมต่อที่ใช้งานอยู่</p>
         </div>
       </div>
 
@@ -950,8 +1119,11 @@ function SystemInfoPanel() {
             </div>
             <div className="w-full bg-gray-200 rounded-full h-2">
               <div 
-                className="bg-blue-600 h-2 rounded-full transition-all duration-300"
-                style={{ width: `${systemInfo.cpuUsage}%` }}
+                className={`h-2 rounded-full transition-all duration-300 ${
+                  systemInfo.cpuUsage > 90 ? 'bg-red-600' :
+                  systemInfo.cpuUsage > 70 ? 'bg-yellow-600' : 'bg-blue-600'
+                }`}
+                style={{ width: `${Math.min(systemInfo.cpuUsage, 100)}%` }}
               />
             </div>
           </div>
@@ -964,25 +1136,33 @@ function SystemInfoPanel() {
             </div>
             <div className="w-full bg-gray-200 rounded-full h-2">
               <div 
-                className="bg-green-600 h-2 rounded-full transition-all duration-300"
-                style={{ width: `${systemInfo.memoryUsage}%` }}
+                className={`h-2 rounded-full transition-all duration-300 ${
+                  systemInfo.memoryUsage > 90 ? 'bg-red-600' :
+                  systemInfo.memoryUsage > 70 ? 'bg-yellow-600' : 'bg-green-600'
+                }`}
+                style={{ width: `${Math.min(systemInfo.memoryUsage, 100)}%` }}
               />
             </div>
           </div>
 
           {/* Disk Usage */}
-          <div>
-            <div className="flex justify-between items-center mb-1">
-              <span className="text-sm text-gray-600">พื้นที่เก็บข้อมูล</span>
-              <span className="text-sm text-gray-900">{systemInfo.diskUsage}%</span>
+          {systemInfo.diskUsage > 0 && (
+            <div>
+              <div className="flex justify-between items-center mb-1">
+                <span className="text-sm text-gray-600">พื้นที่เก็บข้อมูล</span>
+                <span className="text-sm text-gray-900">{systemInfo.diskUsage}%</span>
+              </div>
+              <div className="w-full bg-gray-200 rounded-full h-2">
+                <div 
+                  className={`h-2 rounded-full transition-all duration-300 ${
+                    systemInfo.diskUsage > 90 ? 'bg-red-600' :
+                    systemInfo.diskUsage > 70 ? 'bg-yellow-600' : 'bg-yellow-600'
+                  }`}
+                  style={{ width: `${Math.min(systemInfo.diskUsage, 100)}%` }}
+                />
+              </div>
             </div>
-            <div className="w-full bg-gray-200 rounded-full h-2">
-              <div 
-                className="bg-yellow-600 h-2 rounded-full transition-all duration-300"
-                style={{ width: `${systemInfo.diskUsage}%` }}
-              />
-            </div>
-          </div>
+          )}
         </div>
       </div>
 
@@ -1005,6 +1185,18 @@ function SystemInfoPanel() {
             <span className="text-gray-500">Backup ล่าสุด:</span>
             <span className="ml-2 font-medium">{systemInfo.lastBackup}</span>
           </div>
+          {systemInfo.nodeVersion && (
+            <div>
+              <span className="text-gray-500">Node.js:</span>
+              <span className="ml-2 font-medium">{systemInfo.nodeVersion}</span>
+            </div>
+          )}
+          {systemInfo.platform && (
+            <div>
+              <span className="text-gray-500">Platform:</span>
+              <span className="ml-2 font-medium">{systemInfo.platform}</span>
+            </div>
+          )}
         </div>
       </div>
 
@@ -1066,7 +1258,7 @@ export default function SettingsPage() {
         {/* Tabs */}
         <div className="mb-8">
           <div className="border-b border-gray-200">
-            <nav className="-mb-px flex space-x-8">
+            <nav className="-mb-px flex space-x-8 overflow-x-auto">
               {tabs.map((tab) => {
                 const Icon = tab.icon;
                 return (
@@ -1091,9 +1283,9 @@ export default function SettingsPage() {
         {/* Tab Content */}
         <div>
           {activeTab === 'profile' && <ProfileSettings />}
-          {activeTab === 'system' && <SystemSettingsPanel />}
-          {activeTab === 'security' && <SecuritySettingsPanel />}
-          {activeTab === 'info' && <SystemInfoPanel />}
+          {activeTab === 'system' && currentUser?.role === 'ADMIN' && <SystemSettingsPanel />}
+          {activeTab === 'security' && currentUser?.role === 'ADMIN' && <SecuritySettingsPanel />}
+          {activeTab === 'info' && currentUser?.role === 'ADMIN' && <SystemInfoPanel />}
         </div>
       </div>
     </Layout>
