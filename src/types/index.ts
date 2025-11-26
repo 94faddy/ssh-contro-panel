@@ -78,6 +78,43 @@ export interface DiskUsage {
   mountPoint: string;
 }
 
+// Quick Command Types
+export interface QuickCommand {
+  id: number;
+  name: string;
+  command: string;
+  description?: string;
+  category?: string;
+  color?: string;
+  icon?: string;
+  sortOrder: number;
+  isActive: boolean;
+  userId: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateQuickCommandData {
+  name: string;
+  command: string;
+  description?: string;
+  category?: string;
+  color?: string;
+  icon?: string;
+  sortOrder?: number;
+}
+
+export interface UpdateQuickCommandData {
+  name?: string;
+  command?: string;
+  description?: string;
+  category?: string;
+  color?: string;
+  icon?: string;
+  sortOrder?: number;
+  isActive?: boolean;
+}
+
 // Script Types
 export interface ScriptLog {
   id: number;

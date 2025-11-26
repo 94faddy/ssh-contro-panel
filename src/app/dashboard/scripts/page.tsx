@@ -13,14 +13,22 @@ import {
   ChevronDown,
   ChevronUp,
   Maximize2,
-  Minimize2
+  Minimize2,
+  Plus,
+  Edit2,
+  Trash2,
+  Save,
+  X,
+  Zap,
+  Settings,
+  FolderOpen
 } from 'lucide-react';
 import { io, Socket } from 'socket.io-client';
 import Swal from 'sweetalert2';
 import Layout from '@/components/Layout';
 import MiniTerminal, { MiniTerminalRef } from '@/components/MiniTerminal';
 import { formatDuration } from '@/lib/utils';
-import type { Server, ApiResponse } from '@/types';
+import type { Server, ApiResponse, QuickCommand, CreateQuickCommandData, UpdateQuickCommandData } from '@/types';
 
 interface ServerTerminal {
   serverId: number;
@@ -31,6 +39,29 @@ interface ServerTerminal {
   endTime?: Date;
   isMinimized: boolean;
 }
+
+// Color options for quick commands
+const COLOR_OPTIONS = [
+  { name: 'gray', bg: 'bg-gray-100', hover: 'hover:bg-gray-200', text: 'text-gray-700', border: 'border-gray-300' },
+  { name: 'blue', bg: 'bg-blue-100', hover: 'hover:bg-blue-200', text: 'text-blue-700', border: 'border-blue-300' },
+  { name: 'green', bg: 'bg-green-100', hover: 'hover:bg-green-200', text: 'text-green-700', border: 'border-green-300' },
+  { name: 'yellow', bg: 'bg-yellow-100', hover: 'hover:bg-yellow-200', text: 'text-yellow-700', border: 'border-yellow-300' },
+  { name: 'red', bg: 'bg-red-100', hover: 'hover:bg-red-200', text: 'text-red-700', border: 'border-red-300' },
+  { name: 'purple', bg: 'bg-purple-100', hover: 'hover:bg-purple-200', text: 'text-purple-700', border: 'border-purple-300' },
+  { name: 'pink', bg: 'bg-pink-100', hover: 'hover:bg-pink-200', text: 'text-pink-700', border: 'border-pink-300' },
+  { name: 'indigo', bg: 'bg-indigo-100', hover: 'hover:bg-indigo-200', text: 'text-indigo-700', border: 'border-indigo-300' },
+  { name: 'cyan', bg: 'bg-cyan-100', hover: 'hover:bg-cyan-200', text: 'text-cyan-700', border: 'border-cyan-300' },
+  { name: 'orange', bg: 'bg-orange-100', hover: 'hover:bg-orange-200', text: 'text-orange-700', border: 'border-orange-300' },
+];
+
+// Default quick commands (used when user has no saved commands)
+const DEFAULT_QUICK_COMMANDS = [
+  { name: 'Update System', cmd: 'sudo apt update && sudo apt upgrade -y', color: 'blue' },
+  { name: 'Check Disk', cmd: 'df -h', color: 'green' },
+  { name: 'Check Memory', cmd: 'free -h', color: 'cyan' },
+  { name: 'List Processes', cmd: 'ps aux --sort=-%mem | head -20', color: 'purple' },
+  { name: 'Check Uptime', cmd: 'uptime', color: 'gray' },
+];
 
 // Helper function to get WebSocket URL
 function getWebSocketUrl(): string {
@@ -55,6 +86,12 @@ function getWebSocketUrl(): string {
   return 'http://localhost:3005';
 }
 
+// Get color classes for a quick command
+function getColorClasses(colorName: string) {
+  const color = COLOR_OPTIONS.find(c => c.name === colorName) || COLOR_OPTIONS[0];
+  return color;
+}
+
 export default function ScriptsPage() {
   const [servers, setServers] = useState<Server[]>([]);
   const [selectedServers, setSelectedServers] = useState<number[]>([]);
@@ -67,6 +104,21 @@ export default function ScriptsPage() {
   const [statusFilter, setStatusFilter] = useState<string>('');
   const [loading, setLoading] = useState(true);
   
+  // Quick Commands state
+  const [quickCommands, setQuickCommands] = useState<QuickCommand[]>([]);
+  const [loadingQuickCommands, setLoadingQuickCommands] = useState(true);
+  const [showQuickCommandModal, setShowQuickCommandModal] = useState(false);
+  const [editingQuickCommand, setEditingQuickCommand] = useState<QuickCommand | null>(null);
+  const [quickCommandForm, setQuickCommandForm] = useState<CreateQuickCommandData>({
+    name: '',
+    command: '',
+    description: '',
+    category: '',
+    color: 'gray'
+  });
+  const [savingQuickCommand, setSavingQuickCommand] = useState(false);
+  const [showQuickCommandsManager, setShowQuickCommandsManager] = useState(false);
+  
   // Terminal windows state
   const [terminals, setTerminals] = useState<Map<number, ServerTerminal>>(new Map());
   const [showTerminals, setShowTerminals] = useState(false);
@@ -77,6 +129,7 @@ export default function ScriptsPage() {
 
   useEffect(() => {
     fetchServers();
+    fetchQuickCommands();
     initializeSocket();
     return () => {
       if (socket) {
@@ -107,12 +160,183 @@ export default function ScriptsPage() {
     }
   };
 
+  const fetchQuickCommands = async () => {
+    try {
+      setLoadingQuickCommands(true);
+      const token = localStorage.getItem('auth_token');
+      const response = await fetch('/api/quick-commands', {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+
+      if (response.ok) {
+        const data: ApiResponse<QuickCommand[]> = await response.json();
+        if (data.success && data.data) {
+          setQuickCommands(data.data);
+        }
+      }
+    } catch (error) {
+      console.error('Failed to fetch quick commands:', error);
+    } finally {
+      setLoadingQuickCommands(false);
+    }
+  };
+
+  const saveQuickCommand = async () => {
+    if (!quickCommandForm.name.trim() || !quickCommandForm.command.trim()) {
+      Swal.fire({
+        title: 'ข้อมูลไม่ครบ',
+        text: 'กรุณากรอกชื่อและคำสั่ง',
+        icon: 'warning'
+      });
+      return;
+    }
+
+    setSavingQuickCommand(true);
+
+    try {
+      const token = localStorage.getItem('auth_token');
+      const url = editingQuickCommand 
+        ? `/api/quick-commands/${editingQuickCommand.id}`
+        : '/api/quick-commands';
+      
+      const method = editingQuickCommand ? 'PUT' : 'POST';
+
+      const response = await fetch(url, {
+        method,
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify(quickCommandForm)
+      });
+
+      const data: ApiResponse<QuickCommand> = await response.json();
+
+      if (data.success) {
+        await Swal.fire({
+          title: editingQuickCommand ? 'แก้ไขสำเร็จ!' : 'บันทึกสำเร็จ!',
+          text: editingQuickCommand ? 'แก้ไข Quick Command เรียบร้อยแล้ว' : 'บันทึก Quick Command ใหม่เรียบร้อยแล้ว',
+          icon: 'success',
+          timer: 1500,
+          showConfirmButton: false
+        });
+        
+        setShowQuickCommandModal(false);
+        setEditingQuickCommand(null);
+        setQuickCommandForm({
+          name: '',
+          command: '',
+          description: '',
+          category: '',
+          color: 'gray'
+        });
+        fetchQuickCommands();
+      } else {
+        Swal.fire({
+          title: 'เกิดข้อผิดพลาด',
+          text: data.error || 'ไม่สามารถบันทึกได้',
+          icon: 'error'
+        });
+      }
+    } catch (error) {
+      console.error('Failed to save quick command:', error);
+      Swal.fire({
+        title: 'เกิดข้อผิดพลาด',
+        text: 'ไม่สามารถบันทึกได้',
+        icon: 'error'
+      });
+    } finally {
+      setSavingQuickCommand(false);
+    }
+  };
+
+  const deleteQuickCommand = async (id: number, name: string) => {
+    const result = await Swal.fire({
+      title: 'ยืนยันการลบ',
+      html: `คุณต้องการลบ Quick Command "<strong>${name}</strong>" หรือไม่?`,
+      icon: 'warning',
+      showCancelButton: true,
+      confirmButtonColor: '#ef4444',
+      cancelButtonColor: '#6b7280',
+      confirmButtonText: 'ลบ',
+      cancelButtonText: 'ยกเลิก'
+    });
+
+    if (result.isConfirmed) {
+      try {
+        const token = localStorage.getItem('auth_token');
+        const response = await fetch(`/api/quick-commands/${id}`, {
+          method: 'DELETE',
+          headers: {
+            'Authorization': `Bearer ${token}`
+          }
+        });
+
+        const data: ApiResponse = await response.json();
+
+        if (data.success) {
+          Swal.fire({
+            title: 'ลบสำเร็จ!',
+            text: 'ลบ Quick Command เรียบร้อยแล้ว',
+            icon: 'success',
+            timer: 1500,
+            showConfirmButton: false
+          });
+          fetchQuickCommands();
+        } else {
+          Swal.fire({
+            title: 'เกิดข้อผิดพลาด',
+            text: data.error || 'ไม่สามารถลบได้',
+            icon: 'error'
+          });
+        }
+      } catch (error) {
+        console.error('Failed to delete quick command:', error);
+        Swal.fire({
+          title: 'เกิดข้อผิดพลาด',
+          text: 'ไม่สามารถลบได้',
+          icon: 'error'
+        });
+      }
+    }
+  };
+
+  const openEditModal = (quickCommand: QuickCommand) => {
+    setEditingQuickCommand(quickCommand);
+    setQuickCommandForm({
+      name: quickCommand.name,
+      command: quickCommand.command,
+      description: quickCommand.description || '',
+      category: quickCommand.category || '',
+      color: quickCommand.color || 'gray'
+    });
+    setShowQuickCommandModal(true);
+  };
+
+  const openAddModal = () => {
+    setEditingQuickCommand(null);
+    setQuickCommandForm({
+      name: '',
+      command: '',
+      description: '',
+      category: '',
+      color: 'gray'
+    });
+    setShowQuickCommandModal(true);
+  };
+
+  const applyQuickCommand = (name: string, cmd: string) => {
+    setScriptName(name);
+    setCommand(cmd);
+  };
+
   // Write to specific terminal
   const writeToTerminal = useCallback((serverId: number, data: string, type: 'stdout' | 'stderr' = 'stdout') => {
     const terminalRef = terminalRefsMap.current.get(serverId);
     if (terminalRef) {
       if (type === 'stderr') {
-        // Write stderr in red color
         terminalRef.write(`\x1b[31m${data}\x1b[0m`);
       } else {
         terminalRef.write(data);
@@ -162,7 +386,6 @@ export default function ScriptsPage() {
       setCurrentExecutionId(data.executionId);
       setShowTerminals(true);
       
-      // Initialize terminal windows for each server
       const newTerminals = new Map<number, ServerTerminal>();
       data.servers.forEach(server => {
         newTerminals.set(server.id, {
@@ -175,7 +398,6 @@ export default function ScriptsPage() {
       });
       setTerminals(newTerminals);
 
-      // Write initial message to terminals after they're mounted
       setTimeout(() => {
         data.servers.forEach(server => {
           writeLineToTerminal(server.id, `Connecting to ${server.name}...`, 'yellow');
@@ -183,7 +405,7 @@ export default function ScriptsPage() {
       }, 100);
     });
 
-    // Handle streaming output - REAL-TIME DATA
+    // Handle streaming output
     newSocket.on('script:stream', (data: {
       executionId: string;
       serverId: number;
@@ -192,7 +414,6 @@ export default function ScriptsPage() {
       data: string;
       timestamp: string;
     }) => {
-      // Update terminal status to running
       setTerminals(prev => {
         const newMap = new Map(prev);
         const terminal = newMap.get(data.serverId);
@@ -205,7 +426,6 @@ export default function ScriptsPage() {
         return newMap;
       });
 
-      // Write to xterm
       writeToTerminal(data.serverId, data.data, data.type);
     });
 
@@ -233,7 +453,6 @@ export default function ScriptsPage() {
         return newMap;
       });
 
-      // Write status message to terminal
       if (data.isComplete) {
         if (data.status === 'success') {
           writeLineToTerminal(data.serverId, '', undefined);
@@ -477,7 +696,6 @@ export default function ScriptsPage() {
     });
   };
 
-  // Register terminal ref
   const registerTerminalRef = useCallback((serverId: number, ref: MiniTerminalRef | null) => {
     if (ref) {
       terminalRefsMap.current.set(serverId, ref);
@@ -545,6 +763,21 @@ export default function ScriptsPage() {
   const failedCount = terminalArray.filter(t => t.status === 'failed').length;
   const runningCount = terminalArray.filter(t => t.status === 'running' || t.status === 'connecting').length;
 
+  // Get display quick commands (user's saved or defaults)
+  const displayQuickCommands = quickCommands.length > 0 
+    ? quickCommands 
+    : DEFAULT_QUICK_COMMANDS.map((cmd, index) => ({
+        id: -index - 1,
+        name: cmd.name,
+        command: cmd.cmd,
+        color: cmd.color,
+        sortOrder: index,
+        isActive: true,
+        userId: 0,
+        createdAt: '',
+        updatedAt: ''
+      } as QuickCommand));
+
   return (
     <Layout>
       <div className="max-w-full mx-auto px-4 sm:px-6 lg:px-8">
@@ -595,30 +828,143 @@ systemctl restart nginx"
                   />
                 </div>
 
-                {/* Quick Commands */}
+                {/* Quick Commands Section */}
                 <div>
-                  <label className="form-label text-gray-500">Quick Commands</label>
-                  <div className="flex flex-wrap gap-2">
-                    {[
-                      { name: 'Update System', cmd: 'sudo apt update && sudo apt upgrade -y' },
-                      { name: 'Check Disk', cmd: 'df -h' },
-                      { name: 'Check Memory', cmd: 'free -h' },
-                      { name: 'List Processes', cmd: 'ps aux --sort=-%mem | head -20' },
-                      { name: 'Check Uptime', cmd: 'uptime' },
-                    ].map((quick) => (
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="form-label text-gray-500 flex items-center">
+                      <Zap className="h-4 w-4 mr-1 text-yellow-500" />
+                      Quick Commands
+                    </label>
+                    <div className="flex items-center space-x-2">
                       <button
-                        key={quick.name}
-                        onClick={() => {
-                          setScriptName(quick.name);
-                          setCommand(quick.cmd);
-                        }}
-                        disabled={isRunning}
-                        className="px-3 py-1.5 text-xs bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-full transition-colors disabled:opacity-50"
+                        onClick={() => setShowQuickCommandsManager(!showQuickCommandsManager)}
+                        className="text-xs text-gray-500 hover:text-gray-700 flex items-center"
+                        title="Manage Quick Commands"
                       >
-                        {quick.name}
+                        <Settings className="h-3.5 w-3.5 mr-1" />
+                        จัดการ
                       </button>
-                    ))}
+                      <button
+                        onClick={openAddModal}
+                        disabled={isRunning}
+                        className="text-xs text-blue-600 hover:text-blue-800 flex items-center disabled:opacity-50"
+                      >
+                        <Plus className="h-3.5 w-3.5 mr-1" />
+                        เพิ่มใหม่
+                      </button>
+                    </div>
                   </div>
+                  
+                  {/* Quick Commands Grid */}
+                  <div className="flex flex-wrap gap-2">
+                    {loadingQuickCommands ? (
+                      <div className="flex items-center text-gray-400 text-sm">
+                        <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                        กำลังโหลด...
+                      </div>
+                    ) : (
+                      displayQuickCommands.map((quick) => {
+                        const colorClasses = getColorClasses(quick.color || 'gray');
+                        return (
+                          <div key={quick.id} className="relative group">
+                            <button
+                              onClick={() => applyQuickCommand(quick.name, quick.command)}
+                              disabled={isRunning}
+                              className={`px-3 py-1.5 text-xs ${colorClasses.bg} ${colorClasses.hover} ${colorClasses.text} rounded-full transition-colors disabled:opacity-50 pr-8 group-hover:pr-3`}
+                              title={quick.command}
+                            >
+                              {quick.name}
+                            </button>
+                            {/* Edit/Delete buttons on hover */}
+                            {quick.id > 0 && (
+                              <div className="absolute right-1 top-1/2 -translate-y-1/2 hidden group-hover:flex items-center space-x-0.5">
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    openEditModal(quick);
+                                  }}
+                                  className="p-0.5 text-gray-500 hover:text-blue-600 rounded"
+                                  title="แก้ไข"
+                                >
+                                  <Edit2 className="h-3 w-3" />
+                                </button>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    deleteQuickCommand(quick.id, quick.name);
+                                  }}
+                                  className="p-0.5 text-gray-500 hover:text-red-600 rounded"
+                                  title="ลบ"
+                                >
+                                  <Trash2 className="h-3 w-3" />
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+
+                  {/* Quick Commands Manager */}
+                  {showQuickCommandsManager && quickCommands.length > 0 && (
+                    <div className="mt-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
+                      <div className="flex items-center justify-between mb-2">
+                        <h4 className="text-sm font-medium text-gray-700 flex items-center">
+                          <FolderOpen className="h-4 w-4 mr-1" />
+                          Quick Commands ของคุณ ({quickCommands.length})
+                        </h4>
+                        <button
+                          onClick={() => setShowQuickCommandsManager(false)}
+                          className="text-gray-400 hover:text-gray-600"
+                        >
+                          <X className="h-4 w-4" />
+                        </button>
+                      </div>
+                      <div className="space-y-2 max-h-48 overflow-y-auto">
+                        {quickCommands.map((cmd) => {
+                          const colorClasses = getColorClasses(cmd.color || 'gray');
+                          return (
+                            <div
+                              key={cmd.id}
+                              className={`flex items-center justify-between p-2 rounded-lg border ${colorClasses.border} ${colorClasses.bg}`}
+                            >
+                              <div className="flex-1 min-w-0 mr-2">
+                                <div className={`font-medium text-sm ${colorClasses.text}`}>{cmd.name}</div>
+                                <div className="text-xs text-gray-500 truncate font-mono">{cmd.command}</div>
+                                {cmd.description && (
+                                  <div className="text-xs text-gray-400 truncate">{cmd.description}</div>
+                                )}
+                              </div>
+                              <div className="flex items-center space-x-1">
+                                <button
+                                  onClick={() => applyQuickCommand(cmd.name, cmd.command)}
+                                  className="p-1.5 text-gray-500 hover:text-green-600 hover:bg-green-50 rounded"
+                                  title="ใช้คำสั่งนี้"
+                                >
+                                  <Play className="h-4 w-4" />
+                                </button>
+                                <button
+                                  onClick={() => openEditModal(cmd)}
+                                  className="p-1.5 text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded"
+                                  title="แก้ไข"
+                                >
+                                  <Edit2 className="h-4 w-4" />
+                                </button>
+                                <button
+                                  onClick={() => deleteQuickCommand(cmd.id, cmd.name)}
+                                  className="p-1.5 text-gray-500 hover:text-red-600 hover:bg-red-50 rounded"
+                                  title="ลบ"
+                                >
+                                  <Trash2 className="h-4 w-4" />
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {/* Action Buttons */}
@@ -742,7 +1088,7 @@ systemctl restart nginx"
           </div>
         </div>
 
-        {/* Terminal Windows Section - MOVED TO BOTTOM */}
+        {/* Terminal Windows Section */}
         {showTerminals && terminals.size > 0 && (
           <div className="mt-6">
             {/* Terminal Summary Bar */}
@@ -855,7 +1201,7 @@ systemctl restart nginx"
                     </div>
                   </div>
                   
-                  {/* Terminal Content using xterm.js */}
+                  {/* Terminal Content */}
                   {!terminal.isMinimized && (
                     <div className="flex-1 min-h-0">
                       <MiniTerminal
@@ -878,6 +1224,153 @@ systemctl restart nginx"
                   )}
                 </div>
               ))}
+            </div>
+          </div>
+        )}
+
+        {/* Quick Command Modal */}
+        {showQuickCommandModal && (
+          <div className="fixed inset-0 z-50 overflow-y-auto">
+            <div className="flex items-center justify-center min-h-screen px-4 pt-4 pb-20 text-center sm:block sm:p-0">
+              <div className="fixed inset-0 transition-opacity bg-gray-500 bg-opacity-75" onClick={() => setShowQuickCommandModal(false)} />
+              
+              <div className="inline-block w-full max-w-lg p-6 my-8 overflow-hidden text-left align-middle transition-all transform bg-white shadow-xl rounded-lg sm:align-middle">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-lg font-medium text-gray-900 flex items-center">
+                    <Zap className="h-5 w-5 mr-2 text-yellow-500" />
+                    {editingQuickCommand ? 'แก้ไข Quick Command' : 'เพิ่ม Quick Command ใหม่'}
+                  </h3>
+                  <button
+                    onClick={() => setShowQuickCommandModal(false)}
+                    className="text-gray-400 hover:text-gray-600"
+                  >
+                    <X className="h-5 w-5" />
+                  </button>
+                </div>
+
+                <div className="space-y-4">
+                  {/* Name */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      ชื่อ <span className="text-red-500">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={quickCommandForm.name}
+                      onChange={(e) => setQuickCommandForm(prev => ({ ...prev, name: e.target.value }))}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                      placeholder="e.g., Update System"
+                    />
+                  </div>
+
+                  {/* Command */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      คำสั่ง <span className="text-red-500">*</span>
+                    </label>
+                    <textarea
+                      value={quickCommandForm.command}
+                      onChange={(e) => setQuickCommandForm(prev => ({ ...prev, command: e.target.value }))}
+                      rows={3}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-mono text-sm"
+                      placeholder="e.g., sudo apt update && sudo apt upgrade -y"
+                    />
+                  </div>
+
+                  {/* Description */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      รายละเอียด (ไม่บังคับ)
+                    </label>
+                    <input
+                      type="text"
+                      value={quickCommandForm.description || ''}
+                      onChange={(e) => setQuickCommandForm(prev => ({ ...prev, description: e.target.value }))}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                      placeholder="e.g., Update and upgrade all packages"
+                    />
+                  </div>
+
+                  {/* Category */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      หมวดหมู่ (ไม่บังคับ)
+                    </label>
+                    <input
+                      type="text"
+                      value={quickCommandForm.category || ''}
+                      onChange={(e) => setQuickCommandForm(prev => ({ ...prev, category: e.target.value }))}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                      placeholder="e.g., System, Docker, Database"
+                    />
+                  </div>
+
+                  {/* Color */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      สี
+                    </label>
+                    <div className="flex flex-wrap gap-2">
+                      {COLOR_OPTIONS.map((color) => (
+                        <button
+                          key={color.name}
+                          onClick={() => setQuickCommandForm(prev => ({ ...prev, color: color.name }))}
+                          className={`w-8 h-8 rounded-full ${color.bg} border-2 ${
+                            quickCommandForm.color === color.name 
+                              ? 'border-gray-800 ring-2 ring-offset-1 ring-gray-400' 
+                              : 'border-transparent hover:border-gray-400'
+                          } transition-all`}
+                          title={color.name}
+                        />
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Preview */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      ตัวอย่าง
+                    </label>
+                    <div className="flex items-center">
+                      {(() => {
+                        const colorClasses = getColorClasses(quickCommandForm.color || 'gray');
+                        return (
+                          <span className={`px-3 py-1.5 text-xs ${colorClasses.bg} ${colorClasses.text} rounded-full`}>
+                            {quickCommandForm.name || 'ชื่อคำสั่ง'}
+                          </span>
+                        );
+                      })()}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Actions */}
+                <div className="mt-6 flex justify-end space-x-3">
+                  <button
+                    onClick={() => setShowQuickCommandModal(false)}
+                    className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                  >
+                    ยกเลิก
+                  </button>
+                  <button
+                    onClick={saveQuickCommand}
+                    disabled={savingQuickCommand || !quickCommandForm.name.trim() || !quickCommandForm.command.trim()}
+                    className="px-4 py-2 text-sm font-medium text-white bg-blue-600 border border-transparent rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed flex items-center"
+                  >
+                    {savingQuickCommand ? (
+                      <>
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                        กำลังบันทึก...
+                      </>
+                    ) : (
+                      <>
+                        <Save className="h-4 w-4 mr-2" />
+                        {editingQuickCommand ? 'บันทึกการแก้ไข' : 'บันทึก'}
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         )}
