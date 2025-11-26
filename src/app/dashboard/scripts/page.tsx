@@ -20,8 +20,7 @@ import {
   Save,
   X,
   Zap,
-  Settings,
-  FolderOpen
+  Settings
 } from 'lucide-react';
 import { io, Socket } from 'socket.io-client';
 import Swal from 'sweetalert2';
@@ -107,6 +106,7 @@ export default function ScriptsPage() {
   // Quick Commands state
   const [quickCommands, setQuickCommands] = useState<QuickCommand[]>([]);
   const [loadingQuickCommands, setLoadingQuickCommands] = useState(true);
+  const [showQuickCommandsManager, setShowQuickCommandsManager] = useState(false);
   const [showQuickCommandModal, setShowQuickCommandModal] = useState(false);
   const [editingQuickCommand, setEditingQuickCommand] = useState<QuickCommand | null>(null);
   const [quickCommandForm, setQuickCommandForm] = useState<CreateQuickCommandData>({
@@ -117,7 +117,6 @@ export default function ScriptsPage() {
     color: 'gray'
   });
   const [savingQuickCommand, setSavingQuickCommand] = useState(false);
-  const [showQuickCommandsManager, setShowQuickCommandsManager] = useState(false);
   
   // Terminal windows state
   const [terminals, setTerminals] = useState<Map<number, ServerTerminal>>(new Map());
@@ -835,136 +834,45 @@ systemctl restart nginx"
                       <Zap className="h-4 w-4 mr-1 text-yellow-500" />
                       Quick Commands
                     </label>
-                    <div className="flex items-center space-x-2">
-                      <button
-                        onClick={() => setShowQuickCommandsManager(!showQuickCommandsManager)}
-                        className="text-xs text-gray-500 hover:text-gray-700 flex items-center"
-                        title="Manage Quick Commands"
-                      >
-                        <Settings className="h-3.5 w-3.5 mr-1" />
-                        จัดการ
-                      </button>
-                      <button
-                        onClick={openAddModal}
-                        disabled={isRunning}
-                        className="text-xs text-blue-600 hover:text-blue-800 flex items-center disabled:opacity-50"
-                      >
-                        <Plus className="h-3.5 w-3.5 mr-1" />
-                        เพิ่มใหม่
-                      </button>
-                    </div>
+                    <button
+                      onClick={() => setShowQuickCommandsManager(true)}
+                      disabled={isRunning}
+                      className="text-xs text-blue-600 hover:text-blue-800 flex items-center disabled:opacity-50 px-2 py-1 rounded hover:bg-blue-50 transition-colors"
+                      title="จัดการ Quick Commands"
+                    >
+                      <Settings className="h-3.5 w-3.5 mr-1" />
+                      จัดการ
+                    </button>
                   </div>
                   
-                  {/* Quick Commands Grid */}
+                  {/* Quick Commands Grid - Click to use */}
                   <div className="flex flex-wrap gap-2">
                     {loadingQuickCommands ? (
                       <div className="flex items-center text-gray-400 text-sm">
                         <Loader2 className="h-4 w-4 animate-spin mr-2" />
                         กำลังโหลด...
                       </div>
+                    ) : displayQuickCommands.length === 0 ? (
+                      <div className="text-sm text-gray-400">
+                        ยังไม่มี Quick Commands - <button onClick={() => setShowQuickCommandsManager(true)} className="text-blue-600 hover:underline">เพิ่มคำสั่ง</button>
+                      </div>
                     ) : (
                       displayQuickCommands.map((quick) => {
                         const colorClasses = getColorClasses(quick.color || 'gray');
                         return (
-                          <div key={quick.id} className="relative group">
-                            <button
-                              onClick={() => applyQuickCommand(quick.name, quick.command)}
-                              disabled={isRunning}
-                              className={`px-3 py-1.5 text-xs ${colorClasses.bg} ${colorClasses.hover} ${colorClasses.text} rounded-full transition-colors disabled:opacity-50 pr-8 group-hover:pr-3`}
-                              title={quick.command}
-                            >
-                              {quick.name}
-                            </button>
-                            {/* Edit/Delete buttons on hover */}
-                            {quick.id > 0 && (
-                              <div className="absolute right-1 top-1/2 -translate-y-1/2 hidden group-hover:flex items-center space-x-0.5">
-                                <button
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    openEditModal(quick);
-                                  }}
-                                  className="p-0.5 text-gray-500 hover:text-blue-600 rounded"
-                                  title="แก้ไข"
-                                >
-                                  <Edit2 className="h-3 w-3" />
-                                </button>
-                                <button
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    deleteQuickCommand(quick.id, quick.name);
-                                  }}
-                                  className="p-0.5 text-gray-500 hover:text-red-600 rounded"
-                                  title="ลบ"
-                                >
-                                  <Trash2 className="h-3 w-3" />
-                                </button>
-                              </div>
-                            )}
-                          </div>
+                          <button
+                            key={quick.id}
+                            onClick={() => applyQuickCommand(quick.name, quick.command)}
+                            disabled={isRunning}
+                            className={`px-3 py-1.5 text-xs ${colorClasses.bg} ${colorClasses.hover} ${colorClasses.text} rounded-full transition-all disabled:opacity-50 hover:shadow-md active:scale-95`}
+                            title={`คลิกเพื่อใช้: ${quick.command}`}
+                          >
+                            {quick.name}
+                          </button>
                         );
                       })
                     )}
                   </div>
-
-                  {/* Quick Commands Manager */}
-                  {showQuickCommandsManager && quickCommands.length > 0 && (
-                    <div className="mt-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
-                      <div className="flex items-center justify-between mb-2">
-                        <h4 className="text-sm font-medium text-gray-700 flex items-center">
-                          <FolderOpen className="h-4 w-4 mr-1" />
-                          Quick Commands ของคุณ ({quickCommands.length})
-                        </h4>
-                        <button
-                          onClick={() => setShowQuickCommandsManager(false)}
-                          className="text-gray-400 hover:text-gray-600"
-                        >
-                          <X className="h-4 w-4" />
-                        </button>
-                      </div>
-                      <div className="space-y-2 max-h-48 overflow-y-auto">
-                        {quickCommands.map((cmd) => {
-                          const colorClasses = getColorClasses(cmd.color || 'gray');
-                          return (
-                            <div
-                              key={cmd.id}
-                              className={`flex items-center justify-between p-2 rounded-lg border ${colorClasses.border} ${colorClasses.bg}`}
-                            >
-                              <div className="flex-1 min-w-0 mr-2">
-                                <div className={`font-medium text-sm ${colorClasses.text}`}>{cmd.name}</div>
-                                <div className="text-xs text-gray-500 truncate font-mono">{cmd.command}</div>
-                                {cmd.description && (
-                                  <div className="text-xs text-gray-400 truncate">{cmd.description}</div>
-                                )}
-                              </div>
-                              <div className="flex items-center space-x-1">
-                                <button
-                                  onClick={() => applyQuickCommand(cmd.name, cmd.command)}
-                                  className="p-1.5 text-gray-500 hover:text-green-600 hover:bg-green-50 rounded"
-                                  title="ใช้คำสั่งนี้"
-                                >
-                                  <Play className="h-4 w-4" />
-                                </button>
-                                <button
-                                  onClick={() => openEditModal(cmd)}
-                                  className="p-1.5 text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded"
-                                  title="แก้ไข"
-                                >
-                                  <Edit2 className="h-4 w-4" />
-                                </button>
-                                <button
-                                  onClick={() => deleteQuickCommand(cmd.id, cmd.name)}
-                                  className="p-1.5 text-gray-500 hover:text-red-600 hover:bg-red-50 rounded"
-                                  title="ลบ"
-                                >
-                                  <Trash2 className="h-4 w-4" />
-                                </button>
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
                 </div>
 
                 {/* Action Buttons */}
@@ -1228,9 +1136,119 @@ systemctl restart nginx"
           </div>
         )}
 
-        {/* Quick Command Modal */}
-        {showQuickCommandModal && (
+        {/* Quick Commands Manager Modal */}
+        {showQuickCommandsManager && (
           <div className="fixed inset-0 z-50 overflow-y-auto">
+            <div className="flex items-center justify-center min-h-screen px-4 pt-4 pb-20 text-center sm:block sm:p-0">
+              <div className="fixed inset-0 transition-opacity bg-gray-500 bg-opacity-75" onClick={() => setShowQuickCommandsManager(false)} />
+              
+              <div className="inline-block w-full max-w-2xl p-6 my-8 overflow-hidden text-left align-middle transition-all transform bg-white shadow-xl rounded-lg sm:align-middle">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-lg font-medium text-gray-900 flex items-center">
+                    <Zap className="h-5 w-5 mr-2 text-yellow-500" />
+                    จัดการ Quick Commands
+                  </h3>
+                  <button
+                    onClick={() => setShowQuickCommandsManager(false)}
+                    className="text-gray-400 hover:text-gray-600"
+                  >
+                    <X className="h-5 w-5" />
+                  </button>
+                </div>
+
+                {/* Add New Button */}
+                <div className="mb-4">
+                  <button
+                    onClick={() => {
+                      openAddModal();
+                    }}
+                    className="w-full py-3 border-2 border-dashed border-gray-300 rounded-lg text-gray-500 hover:border-blue-400 hover:text-blue-600 hover:bg-blue-50 transition-all flex items-center justify-center"
+                  >
+                    <Plus className="h-5 w-5 mr-2" />
+                    เพิ่ม Quick Command ใหม่
+                  </button>
+                </div>
+
+                {/* Commands List */}
+                <div className="space-y-2 max-h-96 overflow-y-auto">
+                  {loadingQuickCommands ? (
+                    <div className="flex items-center justify-center py-8 text-gray-400">
+                      <Loader2 className="h-6 w-6 animate-spin mr-2" />
+                      กำลังโหลด...
+                    </div>
+                  ) : quickCommands.length === 0 ? (
+                    <div className="text-center py-8 text-gray-500">
+                      <Zap className="h-12 w-12 mx-auto mb-3 text-gray-300" />
+                      <p>ยังไม่มี Quick Commands</p>
+                      <p className="text-sm">คลิกปุ่มด้านบนเพื่อเพิ่มคำสั่งแรก</p>
+                    </div>
+                  ) : (
+                    quickCommands.map((cmd) => {
+                      const colorClasses = getColorClasses(cmd.color || 'gray');
+                      return (
+                        <div
+                          key={cmd.id}
+                          className={`flex items-center justify-between p-4 rounded-lg border-2 ${colorClasses.border} ${colorClasses.bg} hover:shadow-md transition-all`}
+                        >
+                          <div className="flex-1 min-w-0 mr-4">
+                            <div className="flex items-center">
+                              <span className={`inline-block w-3 h-3 rounded-full mr-2 ${colorClasses.bg.replace('100', '500')}`} style={{backgroundColor: cmd.color === 'gray' ? '#6b7280' : undefined}}></span>
+                              <span className={`font-medium ${colorClasses.text}`}>{cmd.name}</span>
+                            </div>
+                            <div className="text-sm text-gray-500 truncate font-mono mt-1">{cmd.command}</div>
+                            {cmd.description && (
+                              <div className="text-xs text-gray-400 mt-1">{cmd.description}</div>
+                            )}
+                          </div>
+                          <div className="flex items-center space-x-2">
+                            <button
+                              onClick={() => {
+                                applyQuickCommand(cmd.name, cmd.command);
+                                setShowQuickCommandsManager(false);
+                              }}
+                              className="p-2 text-green-600 hover:bg-green-100 rounded-lg transition-colors"
+                              title="ใช้คำสั่งนี้"
+                            >
+                              <Play className="h-5 w-5" />
+                            </button>
+                            <button
+                              onClick={() => openEditModal(cmd)}
+                              className="p-2 text-blue-600 hover:bg-blue-100 rounded-lg transition-colors"
+                              title="แก้ไข"
+                            >
+                              <Edit2 className="h-5 w-5" />
+                            </button>
+                            <button
+                              onClick={() => deleteQuickCommand(cmd.id, cmd.name)}
+                              className="p-2 text-red-600 hover:bg-red-100 rounded-lg transition-colors"
+                              title="ลบ"
+                            >
+                              <Trash2 className="h-5 w-5" />
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+
+                {/* Footer */}
+                <div className="mt-4 pt-4 border-t border-gray-200 flex justify-end">
+                  <button
+                    onClick={() => setShowQuickCommandsManager(false)}
+                    className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200 transition-colors"
+                  >
+                    ปิด
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Quick Command Add/Edit Modal */}
+        {showQuickCommandModal && (
+          <div className="fixed inset-0 z-[60] overflow-y-auto">
             <div className="flex items-center justify-center min-h-screen px-4 pt-4 pb-20 text-center sm:block sm:p-0">
               <div className="fixed inset-0 transition-opacity bg-gray-500 bg-opacity-75" onClick={() => setShowQuickCommandModal(false)} />
               
@@ -1288,20 +1306,6 @@ systemctl restart nginx"
                       onChange={(e) => setQuickCommandForm(prev => ({ ...prev, description: e.target.value }))}
                       className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                       placeholder="e.g., Update and upgrade all packages"
-                    />
-                  </div>
-
-                  {/* Category */}
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                      หมวดหมู่ (ไม่บังคับ)
-                    </label>
-                    <input
-                      type="text"
-                      value={quickCommandForm.category || ''}
-                      onChange={(e) => setQuickCommandForm(prev => ({ ...prev, category: e.target.value }))}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                      placeholder="e.g., System, Docker, Database"
                     />
                   </div>
 
