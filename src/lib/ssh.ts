@@ -72,10 +72,12 @@ export async function testSSHConnection(
 }
 
 // Get or create SSH connection
+// @param isAdmin - If true, skip userId ownership check
 export async function getSSHConnection(
   serverId: number,
   userId: number,
-  forceNew: boolean = false
+  forceNew: boolean = false,
+  isAdmin: boolean = false
 ): Promise<NodeSSH | null> {
   const connectionKey = getConnectionKey(serverId, userId);
   
@@ -101,8 +103,13 @@ export async function getSSHConnection(
       where: { id: serverId },
     });
 
-    if (!server || server.userId !== userId) {
-      throw new Error('Server not found or access denied');
+    if (!server) {
+      throw new Error('Server not found');
+    }
+
+    // Check access: Admin can access any server, others only their own
+    if (!isAdmin && server.userId !== userId) {
+      throw new Error('Access denied to this server');
     }
 
     const ssh = new NodeSSH();
@@ -138,13 +145,17 @@ export async function getSSHConnection(
     console.error('SSH connection failed:', error);
     
     // Update server status to error
-    await prisma.server.update({
-      where: { id: serverId },
-      data: {
-        status: 'ERROR',
-        lastChecked: new Date(),
-      },
-    });
+    try {
+      await prisma.server.update({
+        where: { id: serverId },
+        data: {
+          status: 'ERROR',
+          lastChecked: new Date(),
+        },
+      });
+    } catch (updateError) {
+      console.error('Failed to update server status:', updateError);
+    }
 
     return null;
   }
@@ -154,10 +165,11 @@ export async function getSSHConnection(
 export async function createShellSession(
   serverId: number,
   userId: number,
-  sessionId: string
+  sessionId: string,
+  isAdmin: boolean = false
 ): Promise<boolean> {
   try {
-    const ssh = await getSSHConnection(serverId, userId);
+    const ssh = await getSSHConnection(serverId, userId, false, isAdmin);
     if (!ssh) return false;
 
     // Get initial working directory and environment with proper TERM setting
@@ -588,14 +600,16 @@ export async function closeSSHConnection(serverId: number, userId: number): Prom
 }
 
 // Execute command with streaming for scripts (server-level)
+// @param isAdmin - If true, skip userId ownership check
 export async function executeCommandStreaming(
   serverId: number,
   userId: number,
   command: string,
   onData: StreamCallback,
-  options: { timeout?: number; cwd?: string } = {}
+  options: { timeout?: number; cwd?: string } = {},
+  isAdmin: boolean = false
 ): Promise<{ exitCode: number }> {
-  const ssh = await getSSHConnection(serverId, userId);
+  const ssh = await getSSHConnection(serverId, userId, false, isAdmin);
   
   if (!ssh) {
     throw new Error('Failed to establish SSH connection');
@@ -731,9 +745,10 @@ export async function executeCommand(
   serverId: number,
   userId: number,
   command: string,
-  options: { timeout?: number; cwd?: string } = {}
+  options: { timeout?: number; cwd?: string } = {},
+  isAdmin: boolean = false
 ): Promise<SSHExecCommandResponse> {
-  const ssh = await getSSHConnection(serverId, userId);
+  const ssh = await getSSHConnection(serverId, userId, false, isAdmin);
   
   if (!ssh) {
     throw new Error('Failed to establish SSH connection');

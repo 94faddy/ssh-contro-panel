@@ -23,12 +23,18 @@ const ptyShellSessions = new Map<string, PTYSession>();
 
 /**
  * Create a real PTY shell session using ssh2 directly
+ * @param serverId - Server ID to connect to
+ * @param userId - User ID making the request
+ * @param sessionId - Unique session identifier
+ * @param options - Terminal options (cols, rows)
+ * @param isAdmin - Whether the user is an admin (can access any server)
  */
 export async function createPTYShellSession(
   serverId: number,
   userId: number,
   sessionId: string,
-  options: { cols?: number; rows?: number } = {}
+  options: { cols?: number; rows?: number } = {},
+  isAdmin: boolean = false
 ): Promise<{ success: boolean; error?: string; cwd?: string }> {
   try {
     // Get server details
@@ -36,8 +42,13 @@ export async function createPTYShellSession(
       where: { id: serverId },
     });
 
-    if (!server || server.userId !== userId) {
-      return { success: false, error: 'Server not found or access denied' };
+    if (!server) {
+      return { success: false, error: 'Server not found' };
+    }
+
+    // Check access: Admin can access any server, others only their own
+    if (!isAdmin && server.userId !== userId) {
+      return { success: false, error: 'Access denied to this server' };
     }
 
     const cols = options.cols || 120;

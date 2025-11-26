@@ -141,6 +141,7 @@ io.use(async (socket, next) => {
 
     socket.data.userId = user.id;
     socket.data.email = user.email;
+    socket.data.role = user.role; // เพิ่ม role สำหรับตรวจสอบสิทธิ์
     next();
   } catch (error) {
     console.error('WebSocket auth error:', error);
@@ -149,13 +150,33 @@ io.use(async (socket, next) => {
 });
 
 // ==========================================
+// Helper function to check server access
+// ==========================================
+async function canAccessServer(userId: number, userRole: string, serverId: number): Promise<boolean> {
+  // ADMIN can access all servers
+  if (userRole === 'ADMIN') {
+    const server = await prisma.server.findUnique({
+      where: { id: serverId },
+    });
+    return !!server;
+  }
+  
+  // DEVELOPER can only access their own servers
+  const server = await prisma.server.findUnique({
+    where: { id: serverId },
+  });
+  return server?.userId === userId;
+}
+
+// ==========================================
 // Connection Handler
 // ==========================================
 io.on('connection', (socket) => {
   const userId = socket.data.userId;
   const userEmail = socket.data.email;
+  const userRole = socket.data.role;
   
-  console.log(`User ${userEmail} connected from ${socket.handshake.address}`);
+  console.log(`User ${userEmail} (${userRole}) connected from ${socket.handshake.address}`);
 
   // ==========================================
   // Terminal Connect (PTY Mode)
@@ -164,20 +185,26 @@ io.on('connection', (socket) => {
     try {
       const { serverId, cols = 120, rows = 30 } = data;
 
-      // Verify server access
+      // Verify server access - ADMIN can access all servers
       const server = await prisma.server.findUnique({
         where: { id: serverId },
       });
 
-      if (!server || server.userId !== userId) {
+      if (!server) {
+        socket.emit('terminal:error', { error: 'Server not found' });
+        return;
+      }
+
+      // Check access: ADMIN can access all, DEVELOPER only their own
+      if (userRole !== 'ADMIN' && server.userId !== userId) {
         socket.emit('terminal:error', { error: 'Access denied to this server' });
         return;
       }
 
       const sessionId = `pty-${userId}-${serverId}-${Date.now()}`;
 
-      // Create PTY shell session
-      const result = await createPTYShellSession(serverId, userId, sessionId, { cols, rows });
+      // Create PTY shell session - pass isAdmin flag
+      const result = await createPTYShellSession(serverId, userId, sessionId, { cols, rows }, userRole === 'ADMIN');
       
       if (!result.success) {
         socket.emit('terminal:error', { error: result.error || 'Failed to create PTY session' });
@@ -226,7 +253,7 @@ io.on('connection', (socket) => {
         currentDir: result.cwd || '~'
       });
 
-      console.log(`PTY Terminal session ${sessionId} started for server ${server.name}`);
+      console.log(`PTY Terminal session ${sessionId} started for server ${server.name} by ${userEmail} (${userRole})`);
     } catch (error) {
       console.error('Terminal connection error:', error);
       socket.emit('terminal:error', { error: 'Failed to connect to terminal' });
@@ -385,7 +412,7 @@ io.on('connection', (socket) => {
       const { scriptId, scriptName, command, serverIds, executionId } = data;
       const execId = executionId || `exec-${userId}-${Date.now()}`;
 
-      console.log(`Script execution requested: scriptId=${scriptId}, scriptName=${scriptName}, servers=${serverIds?.join(',')}`);
+      console.log(`Script execution requested by ${userEmail} (${userRole}): scriptName=${scriptName}, servers=${serverIds?.join(',')}`);
 
       // Validate serverIds
       if (!serverIds || !Array.isArray(serverIds) || serverIds.length === 0) {
@@ -414,13 +441,24 @@ io.on('connection', (socket) => {
         return;
       }
 
-      // Get servers
-      const servers = await prisma.server.findMany({
-        where: { 
-          id: { in: serverIds },
-          userId 
-        },
-      });
+      // Get servers - ADMIN can access all servers, DEVELOPER only their own
+      let servers;
+      if (userRole === 'ADMIN') {
+        // ADMIN can access any server
+        servers = await prisma.server.findMany({
+          where: { 
+            id: { in: serverIds }
+          },
+        });
+      } else {
+        // DEVELOPER can only access their own servers
+        servers = await prisma.server.findMany({
+          where: { 
+            id: { in: serverIds },
+            userId
+          },
+        });
+      }
 
       if (servers.length === 0) {
         socket.emit('script:error', { executionId: execId, error: 'No valid servers found' });
@@ -447,7 +485,7 @@ io.on('connection', (socket) => {
         servers: servers.map(s => ({ id: s.id, name: s.name }))
       });
 
-      console.log(`Script "${finalScriptName}" started on ${servers.length} servers`);
+      console.log(`Script "${finalScriptName}" started on ${servers.length} servers by ${userEmail} (${userRole})`);
 
       let successCount = 0;
       let failedCount = 0;
@@ -472,7 +510,7 @@ io.on('connection', (socket) => {
         try {
           let exitCode = 0;
           
-          // Execute command with streaming
+          // Execute command with streaming - pass isAdmin flag
           await executeCommandStreaming(
             server.id,
             userId,
@@ -496,7 +534,8 @@ io.on('connection', (socket) => {
                 exitCode = streamData as number;
               }
             },
-            { timeout: 600000 } // 10 minutes
+            { timeout: 600000 }, // 10 minutes
+            userRole === 'ADMIN' // isAdmin flag
           );
 
           const success = exitCode === 0;
