@@ -11,88 +11,108 @@ datasource db {
 }
 
 model User {
-  id        Int       @id @default(autoincrement())
-  email     String    @unique
+  id        Int      @id @default(autoincrement())
+  email     String   @unique
   password  String
   name      String
-  role      String    @default("DEVELOPER") // ADMIN, DEVELOPER
-  isActive  Boolean   @default(true)
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
+  role      Role     @default(DEVELOPER)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  servers     Server[]
-  scriptLogs  ScriptLog[]
+  servers    Server[]
+  scriptLogs ScriptLog[]
 
-  @@index([email])
-  @@index([role])
+  @@map("users")
 }
 
 model Server {
-  id          Int       @id @default(autoincrement())
+  id          Int          @id @default(autoincrement())
   name        String
   host        String
-  port        Int       @default(22)
+  port        Int          @default(22)
   username    String
   password    String
-  isActive    Boolean   @default(true)
-  status      String    @default("DISCONNECTED") // CONNECTED, DISCONNECTED, ERROR, CONNECTING
+  isActive    Boolean      @default(true)
+  status      ServerStatus @default(DISCONNECTED)
   lastChecked DateTime?
   systemInfo  Json?
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
   userId      Int
 
-  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
-  serverLogs  ServerLog[]
-  scriptLogs  ScriptLog[]
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  serverLogs ServerLog[]
+  scriptLogs ScriptLog[]
 
-  @@index([userId])
-  @@index([status])
-  @@index([host])
+  @@map("servers")
 }
 
 model ServerLog {
   id        Int      @id @default(autoincrement())
-  serverId  Int
-  logType   String   // COMMAND, ERROR, INFO, WARNING
+  logType   LogType
   message   String   @db.Text
   data      Json?
+  serverId  Int
   createdAt DateTime @default(now())
 
   server Server @relation(fields: [serverId], references: [id], onDelete: Cascade)
 
-  @@index([serverId])
-  @@index([logType])
-  @@index([createdAt])
+  @@map("server_logs")
 }
 
 model ScriptLog {
-  id         Int       @id @default(autoincrement())
+  id         Int          @id @default(autoincrement())
   scriptName String
-  command    String    @db.Text
-  status     String    @default("RUNNING") // RUNNING, SUCCESS, FAILED, CANCELLED
-  output     String?   @db.LongText
-  error      String?   @db.Text
-  startTime  DateTime  @default(now())
+  command    String       @db.Text
+  status     ScriptStatus @default(RUNNING)
+  output     String?      @db.LongText
+  error      String?      @db.Text
+  startTime  DateTime     @default(now())
   endTime    DateTime?
   duration   Int?
   userId     Int
   serverId   Int
 
-  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Restrict)
   server Server @relation(fields: [serverId], references: [id], onDelete: Cascade)
 
-  @@index([userId])
-  @@index([serverId])
-  @@index([status])
-  @@index([startTime])
+  @@map("script_logs")
 }
 
 model SystemSettings {
-  key       String   @id @unique
+  id        Int      @id @default(autoincrement())
+  key       String   @unique
   value     Json
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@index([key])
+  @@map("system_settings")
+}
+
+enum Role {
+  ADMIN
+  DEVELOPER
+}
+
+enum ServerStatus {
+  CONNECTED
+  DISCONNECTED
+  ERROR
+  CONNECTING
+}
+
+enum LogType {
+  CONNECTION
+  COMMAND
+  ERROR
+  SYSTEM
+  AUTH
+}
+
+enum ScriptStatus {
+  RUNNING
+  SUCCESS
+  FAILED
+  CANCELLED
 }
