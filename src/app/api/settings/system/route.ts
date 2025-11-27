@@ -24,7 +24,7 @@ const DEFAULT_SETTINGS: SystemSettings = {
   maxServersPerUser: 10,
   sessionTimeout: 3600,
   maxFileUploadSize: 10,
-  enableRegistration: false,
+  enableRegistration: false, // Default to false for security
   enableEmailNotifications: true,
   enableSyslogExport: true,
   defaultUserRole: 'DEVELOPER',
@@ -35,15 +35,19 @@ const DEFAULT_SETTINGS: SystemSettings = {
 // GET /api/settings/system - Get system settings
 export const GET = withAdminAuth(async (request: NextRequest & { user: User }) => {
   try {
-    // Try to get settings from database
-    const settingsRecord = await prisma.systemSettings.findFirst({
+    // Try to get settings from database - ใช้ findUnique แทน findFirst
+    const settingsRecord = await prisma.systemSettings.findUnique({
       where: { key: 'system' }
     });
 
     if (settingsRecord) {
+      // Merge with defaults to ensure all fields exist
+      const savedSettings = settingsRecord.value as unknown as Partial<SystemSettings>;
+      const mergedSettings: SystemSettings = { ...DEFAULT_SETTINGS, ...savedSettings };
+      
       return NextResponse.json<ApiResponse<SystemSettings>>({
         success: true,
-        data: settingsRecord.value as unknown as SystemSettings
+        data: mergedSettings
       });
     }
 
@@ -98,15 +102,21 @@ export const PUT = withAdminAuth(async (request: NextRequest & { user: User }) =
     }
 
     try {
-      // Get current settings
-      const currentSettings = await prisma.systemSettings.findFirst({
+      // Get current settings - ใช้ findUnique
+      const currentSettings = await prisma.systemSettings.findUnique({
         where: { key: 'system' }
       });
 
       const currentValue = currentSettings?.value as unknown as SystemSettings || DEFAULT_SETTINGS;
       const newSettings: SystemSettings = { ...currentValue, ...body };
 
-      // Upsert settings
+      // Log the change for debugging
+      console.log('Updating system settings:', {
+        previous: currentValue.enableRegistration,
+        new: newSettings.enableRegistration
+      });
+
+      // Upsert settings - ใช้ unique key
       await prisma.systemSettings.upsert({
         where: { key: 'system' },
         update: { 
@@ -122,16 +132,14 @@ export const PUT = withAdminAuth(async (request: NextRequest & { user: User }) =
       return NextResponse.json<ApiResponse<SystemSettings>>({
         success: true,
         data: newSettings,
-        message: 'System settings updated successfully'
+        message: 'บันทึกการตั้งค่าระบบเรียบร้อยแล้ว'
       });
     } catch (dbError) {
-      // If table doesn't exist, just return success with the settings
-      console.log('Database operation failed, settings not persisted:', dbError);
-      return NextResponse.json<ApiResponse<SystemSettings>>({
-        success: true,
-        data: { ...DEFAULT_SETTINGS, ...body },
-        message: 'Settings applied (note: database table for settings may not exist)'
-      });
+      console.error('Database operation failed:', dbError);
+      return NextResponse.json<ApiResponse>({
+        success: false,
+        error: 'ไม่สามารถบันทึกการตั้งค่าได้ กรุณาลองใหม่อีกครั้ง'
+      }, { status: 500 });
     }
 
   } catch (error) {

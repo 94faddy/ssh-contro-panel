@@ -8,58 +8,61 @@ import type { RegisterData, ApiResponse, User } from '@/types';
 export async function POST(request: NextRequest) {
   try {
     // Check if registration is enabled
-    let registrationEnabled = true; // Default to true
+    let registrationEnabled = false; // Default to false for security
     
     try {
-      const settingsRecord = await prisma.systemSettings.findFirst({
+      // ใช้ findUnique แทน findFirst
+      const settingsRecord = await prisma.systemSettings.findUnique({
         where: { key: 'system' }
       });
       
       if (settingsRecord) {
         const settings = settingsRecord.value as any;
-        registrationEnabled = settings.enableRegistration !== false;
+        // ตรวจสอบว่า enableRegistration เป็น true explicitly
+        registrationEnabled = settings.enableRegistration === true;
       }
     } catch (e) {
-      // If table doesn't exist, default to enabled
-      registrationEnabled = true;
+      console.error('Error checking registration settings:', e);
+      // If table doesn't exist or error, default to disabled
+      registrationEnabled = false;
     }
 
     if (!registrationEnabled) {
       return NextResponse.json<ApiResponse>({
         success: false,
-        error: 'Registration is currently disabled'
+        error: 'การสมัครสมาชิกถูกปิดใช้งานอยู่ในขณะนี้ กรุณาติดต่อผู้ดูแลระบบ'
       }, { status: 403 });
     }
 
     const body = await request.json() as RegisterData;
-    const { email, password, name, role = 'DEVELOPER' } = body;
+    const { email, password, name } = body;
 
     // Validate input
     if (!email || !password || !name) {
       return NextResponse.json<ApiResponse>({
         success: false,
-        error: 'Email, password, and name are required'
+        error: 'กรุณากรอกอีเมล รหัสผ่าน และชื่อให้ครบถ้วน'
       }, { status: 400 });
     }
 
     if (!validateEmail(email)) {
       return NextResponse.json<ApiResponse>({
         success: false,
-        error: 'Invalid email format'
+        error: 'รูปแบบอีเมลไม่ถูกต้อง'
       }, { status: 400 });
     }
 
     if (password.length < 6) {
       return NextResponse.json<ApiResponse>({
         success: false,
-        error: 'Password must be at least 6 characters long'
+        error: 'รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร'
       }, { status: 400 });
     }
 
     if (name.length < 2) {
       return NextResponse.json<ApiResponse>({
         success: false,
-        error: 'Name must be at least 2 characters long'
+        error: 'ชื่อต้องมีอย่างน้อย 2 ตัวอักษร'
       }, { status: 400 });
     }
 
@@ -75,7 +78,7 @@ export async function POST(request: NextRequest) {
     if (existingUser) {
       return NextResponse.json<ApiResponse>({
         success: false,
-        error: 'User with this email already exists'
+        error: 'อีเมลนี้ถูกใช้งานแล้ว'
       }, { status: 409 });
     }
 
@@ -111,14 +114,14 @@ export async function POST(request: NextRequest) {
     return NextResponse.json<ApiResponse<User>>({
       success: true,
       data: user,
-      message: 'Registration successful'
+      message: 'สมัครสมาชิกสำเร็จ! กรุณาเข้าสู่ระบบ'
     }, { status: 201 });
 
   } catch (error) {
     console.error('Public registration error:', error);
     return NextResponse.json<ApiResponse>({
       success: false,
-      error: 'Internal server error'
+      error: 'เกิดข้อผิดพลาดภายในระบบ กรุณาลองใหม่อีกครั้ง'
     }, { status: 500 });
   }
 }
